@@ -88,13 +88,18 @@ def fingerprint(job):
     return hashlib.sha256(json.dumps(normalized).encode()).hexdigest()
 
 
-def preference_matches(job, preferences):
-    """All configured dimensions must match; empty lists impose no restriction."""
-    for key, field in (('roles', 'title'), ('companies', 'company'),
-                       ('locations', 'location')):
-        wanted = preferences.get(key, [])
-        if wanted and not any(re.search(r'\b' + re.escape(s.lower()) + r'\b',
-                                         job.get(field, '').lower()) for s in wanted):
-            return False
-    return term_matches(job, preferences.get('terms', []),
-                        preferences.get('keep_unknown_terms', True))
+def categorize(job, category_terms):
+    """Field-based category tags: a title can match quant terms, general
+    terms, both, or neither (falls back to general so every job is grouped
+    somewhere for delivery)."""
+    title = job.get('title', '').lower()
+    quant_kw = category_terms.get('quant', [])
+    general_kw = category_terms.get('general', [])
+    cats = set()
+    if any(k.lower() in title for k in quant_kw):
+        cats.add('quant')
+    if any(k.lower() in title for k in general_kw):
+        cats.add('general')
+    if not cats:
+        cats.add('general')
+    return sorted(cats)

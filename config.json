@@ -959,6 +959,31 @@
       "name": "Quora",
       "ats": "ashby",
       "board": "quora"
+    },
+    {
+      "name": "Aquatic Capital Management",
+      "ats": "greenhouse",
+      "board": "aquaticcapitalmanagement"
+    },
+    {
+      "name": "Voloridge Investment Management",
+      "ats": "greenhouse",
+      "board": "voloridgeinvestmentmanagement"
+    },
+    {
+      "name": "Walleye Capital (Quantic)",
+      "ats": "greenhouse",
+      "board": "walleyecapital"
+    },
+    {
+      "name": "TransMarket Group",
+      "ats": "greenhouse",
+      "board": "transmarketgroup"
+    },
+    {
+      "name": "Seven Research",
+      "ats": "greenhouse",
+      "board": "sevenresearch"
     }
   ],
   "simplify": {
@@ -1061,7 +1086,51 @@
   ],
   "keep_unknown_terms": true,
   "dedup_days": 30,
-  "max_discord_per_run": 50,
   "follow_up_days": 14,
-  "profiles": {}
+  "category_terms": {
+    "quant": [
+      "quantitative",
+      "quant developer",
+      "quant researcher",
+      "quant trading",
+      "trading",
+      "algo trading"
+    ],
+    "general": [
+      "software",
+      "swe",
+      "backend",
+      "back end",
+      "frontend",
+      "front end",
+      "full stack",
+      "fullstack",
+      "systems",
+      "infrastructure",
+      "platform",
+      "site reliability",
+      "devops",
+      "security engineer",
+      "data science",
+      "data engineer",
+      "data engineering",
+      "machine learning",
+      "ml engineer",
+      "ai engineer",
+      "artificial intelligence",
+      "research engineer",
+      "applied scientist",
+      "mobile",
+      "ios",
+      "android",
+      "computer vision",
+      "nlp",
+      "cloud",
+      "embedded",
+      "firmware",
+      "hardware engineer",
+      "web developer",
+      "product engineer"
+    ]
+  }
 }

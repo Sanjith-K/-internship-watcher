@@ -1,30 +1,92 @@
 # Internship Watcher
 
-This repository monitors internship postings and routes matching jobs to Discord, email, and Notion. It is designed to run from GitHub Actions or locally. GitHub's schedule is best effort, so the `*/10` cron is a request to GitHub rather than a delivery guarantee; runs can be delayed for hours.
+This repository monitors internship postings and routes matching jobs to a
+per-run email digest and a single Notion database. It is designed to run
+from GitHub Actions or locally. GitHub's schedule is best effort, so the
+`*/10` cron is a request to GitHub rather than a delivery guarantee; runs
+can be delayed for hours.
 
 ## Architecture
 
 Each watcher run:
 
-1. Fetches the 173 company boards listed in `config.json` using the Greenhouse, Lever, and Ashby public APIs. It also reads the enabled SimplifyJobs and Jobright feeds.
-2. Applies the title, location, and season filters to every source. The top-level `terms` list applies to all sources; `simplify.terms` remains a backward-compatible fallback only when top-level `terms` is absent. `keep_unknown_terms` controls whether a posting with no recognizable season term is retained and defaults to keeping unknown terms.
-3. Identifies postings by ATS identity or canonical URL. Known campaign parameters are removed, while other URL query parameters are preserved because they may identify the job. Exact identities remain known indefinitely. Cross-source fuzzy fingerprints are retained for `dedup_days` (30 days by default). Legacy `norm:` entries in state are ignored for matching and are not removed.
-4. Places each new job into `delivery_state.json` with its individual destinations. Discord notifications are individual posts and retain the 📌 instruction. There are no digest messages. `max_discord_per_run` defaults to 50; undelivered destinations remain queued for a later run.
-5. Delivers to the configured Discord webhooks, email, and Notion master log. Notion reaction and applied-link processing then update personal trackers.
+1. Fetches the 178 company boards listed in `config.json` using the
+   Greenhouse, Lever, and Ashby public APIs. It also reads the enabled
+   SimplifyJobs and Jobright feeds.
+2. Applies the title, location, and season filters to every source. The
+   top-level `terms` list applies to all sources; `simplify.terms` remains a
+   backward-compatible fallback only when top-level `terms` is absent.
+   `keep_unknown_terms` controls whether a posting with no recognizable
+   season term is retained and defaults to keeping unknown terms.
+3. Tags each match with a category — `quant`, `general`, or both — based on
+   title keywords in `config.json`'s `category_terms.quant` /
+   `category_terms.general` lists. A job matching neither defaults to
+   `general` so nothing is left ungrouped. The category is stored on the job
+   record (`categories`), so downstream delivery never re-derives it.
+4. Identifies postings by ATS identity or canonical URL. Known campaign
+   parameters are removed, while other URL query parameters are preserved
+   because they may identify the job. Exact identities remain known
+   indefinitely. Cross-source fuzzy fingerprints are retained for
+   `dedup_days` (30 days by default). Legacy `norm:` entries in state are
+   ignored for matching and are not removed.
+5. Places each new job into `delivery_state.json` with its individual
+   destinations (`email` and/or `notion`, depending on which credentials are
+   configured). Undelivered destinations remain queued for a later run.
+6. Delivers a single email digest per run — grouped into Quant and General
+   sections — and upserts each job into the Notion master log.
 
-The watcher checkpoints intent before external delivery and uses atomic JSON writes. A request timeout can still mean that Discord accepted a message before the response was lost, so a retry can duplicate a Discord post. Querying existing Notion rows by job identity reduces duplicate tracker rows, but delivery is not exactly once.
+The watcher checkpoints intent before external delivery and uses atomic JSON
+writes.
 
-The repository also contains the `internship-pinger` Cloudflare Worker. It triggers the `watch.yml` workflow and monitors completed main-branch runs, sending hourly stale or failure warnings. See [`internship-pinger/README.md`](internship-pinger/README.md) for its setup.
+The repository also contains the `internship-pinger` Cloudflare Worker. It
+triggers the `watch.yml` workflow and monitors completed main-branch runs,
+writing an hourly health status to a Notion callout. See
+[`internship-pinger/README.md`](internship-pinger/README.md) for its setup.
 
-## Notion and Discord workflow
+## Notion: the master log is the tracker
 
-The shared Notion database is **All Internship Postings**. A member reacts 📌 to an individual Discord job post; the bot reads reactions through the Discord REST API and creates or updates that member's tracker. Pin work is durable in `pending_pins`.
+The Notion database **All Internship Postings** is both the master log and
+the personal tracker — there's only one user, so there's no separate
+per-person database. Every new posting is upserted with `Status = Saved` and
+a `Category` (Quant/General, multi-select so a job matching both keeps both
+tags).
 
-To record an application, paste a job URL in the configured applied channel. The parser uses ATS APIs where possible and fetches HTML metadata when it needs to identify the company, role, or location. The URL is preserved. Applied work is durable in `pending_applied`, and the channel cursor is checkpointed before processing advances.
+Promote a row by hand in Notion: change `Status` to `Applied`, `OA`,
+`Interview`, `Offer`, or `Rejected` as your pipeline for that job moves. This
+replaces the old Discord 📌-reaction save flow — since every job is already
+logged with `Status = Saved`, there's no separate "save" action needed at
+all.
 
-Applied tracker rows have `Status`, `Applied On`, and `Follow-up` properties. The default follow-up interval is 14 days (`follow_up_days`); a profile can override it, and `0` disables the due date. The Notion stats callout includes applied status counts and due follow-ups. Existing tracker rows are scanned by canonical job identity before an upsert, including rows created by the legacy schema. Existing history is retained; no reseed or migration is required. URLs that were already stripped by an older version cannot be repaired automatically.
+When you flip a row's `Status` to `Applied` in Notion, the *next* watcher run
+notices it has no `Applied On` date yet and back-fills `Applied On` (today)
+and `Follow-up` (today + `follow_up_days`) automatically. This reconciliation
+sweep replaces the old Discord applied-link channel — no message parsing, no
+bot, just a periodic Notion query.
 
-Personal routing preferences are optional entries in `config.json` under `profiles`, keyed by Discord user ID. A profile may define `roles`, `companies`, `locations`, `terms`, `keep_unknown_terms`, `webhook_env`, and `follow_up_days`. These preferences control that profile's optional notifications and follow-up behavior; they do not gate explicit saved or applied actions.
+**Logging an application the watcher never surfaced** (you applied on a
+company's site directly, or via LinkedIn): run
+
+```bash
+python notion_sync.py --applied "https://boards.greenhouse.io/acme/jobs/123"
+```
+
+This reuses the exact same ATS-API + HTML-metadata parser the old
+applied-link channel used, resolving company/role/location from the URL, and
+upserts an `Applied` row (with dates already filled in) into the same
+database. It needs `NOTION_TOKEN`/`NOTION_PARENT_PAGE_ID` set in your
+environment, same as a normal run.
+
+Applied tracker rows have `Status`, `Applied On`, and `Follow-up` properties.
+The default follow-up interval is 14 days (`follow_up_days`); `0` disables
+the due date. The Notion 📊 stats callout on the parent page includes
+pipeline status counts and due follow-ups. Existing rows are scanned by
+canonical job identity before an upsert, including rows created by the
+legacy schema, so history from before this change is preserved. URLs that
+were already stripped by an older version cannot be repaired automatically.
+
+Once a day, a dead-posting sweep flips `Saved` rows whose posting has
+disappeared from its ATS to `Closed`, so you don't draft an application for a
+dead link. `Applied`+ rows are left alone.
 
 ## Setup
 
@@ -34,19 +96,6 @@ Install dependencies with:
 pip install -r requirements.txt
 ```
 
-### Discord webhooks
-
-Create one or two Discord webhooks and provide their URLs as repository secrets or local environment variables:
-
-| Variable | Use |
-| --- | --- |
-| `DISCORD_WEBHOOK_URL` | General notifications |
-| `DISCORD_WEBHOOK_URL_TOP` | Optional top-company notifications |
-
-For personal profile webhooks, set the `PERSONAL_WEBHOOKS_JSON` GitHub secret to a JSON object mapping `DISCORD_WEBHOOK_*` environment-variable names to webhook URLs. For example, use a placeholder value such as `{"DISCORD_WEBHOOK_URL_EXAMPLE":"https://discord.com/api/webhooks/REDACTED"}`; never commit a real token. The workflow imports these mappings before running the watcher. A profile's `webhook_env` must start with `DISCORD_WEBHOOK_`. This secret is already exposed by the workflow; adding or changing profiles only requires configuration and the matching secret mapping.
-
-The watcher posts individual messages. `DISCORD_BOT_TOKEN` is separate: it is needed to read 📌 reactions and the applied channel, and the bot uses REST only. Give it View Channels, Read Message History, and Add Reactions. Enable Message Content Intent if using the applied channel. Set `APPLIED_CHANNEL_ID` to that channel's ID.
-
 ### Notion
 
 Create an internal integration at [notion.so/my-integrations](https://www.notion.so/my-integrations), share the parent page with it, and set:
@@ -54,55 +103,70 @@ Create an internal integration at [notion.so/my-integrations](https://www.notion
 | Variable | Use |
 | --- | --- |
 | `NOTION_TOKEN` | Notion API access |
-| `NOTION_PARENT_PAGE_ID` | Parent page for the master log and trackers |
+| `NOTION_PARENT_PAGE_ID` | Parent page for the master log/tracker database |
 
 ### Email
 
-Email is optional. Set `SMTP_USER`, `SMTP_PASS`, and optionally `ALERT_EMAIL`; `SMTP_HOST` and `SMTP_PORT` can be configured in `config.json` or the environment.
+Set `SMTP_USER`, `SMTP_PASS`, and optionally `ALERT_EMAIL`; `SMTP_HOST` and
+`SMTP_PORT` can be configured in `config.json` or the environment. Email is
+the primary glance-and-go surface: one digest per run, grouped into Quant and
+General sections, listing every new posting found that run. There's no
+digest batching across runs — if a run finds nothing new, no email is sent.
 
 ### Dry runs and credentials
 
-With no delivery credentials, or with `python watcher.py --dry-run`, the watcher fetches and previews matching boards and feeds but does not write state or call Discord, email, or Notion. Fetching public boards is the only external activity in this mode. A normal run requires at least one configured delivery destination.
+With no delivery credentials, or with `python watcher.py --dry-run`, the
+watcher fetches and previews matching boards and feeds but does not write
+state or call email or Notion. Fetching public boards is the only external
+activity in this mode. A normal run requires at least one configured
+delivery destination.
 
 ## Configuration
 
-`config.json` contains the 173 `companies` entries plus explicit defaults for `terms`, `keep_unknown_terms`, `dedup_days` (30), `max_discord_per_run` (50), `follow_up_days` (14), and `profiles` (an empty object unless configured). It also contains the SimplifyJobs and Jobright feed settings. Add a board only after verifying its slug with `verify_boards.py`; unsupported or stale slugs can return 404. The configured `exclude_locations` list uses word-boundary matching and keeps locations that clearly contain a US state or USA. Empty or unknown locations are retained.
+`config.json` contains the 178 `companies` entries plus explicit defaults
+for `terms`, `keep_unknown_terms`, `dedup_days` (30), `follow_up_days` (14),
+and `category_terms` (the `quant`/`general` keyword lists used for category
+tagging). It also contains the SimplifyJobs and Jobright feed settings. Add
+a board only after verifying its slug with `verify_boards.py`; unsupported
+or stale slugs can return 404. The configured `exclude_locations` list uses
+word-boundary matching and keeps locations that clearly contain a US state
+or USA. Empty or unknown locations are retained.
 
-For profiles, use Discord user IDs as keys, for example:
+`category_terms` looks like:
 
 ```json
 {
-  "profiles": {
-    "123456789012345678": {
-      "roles": ["machine learning", "software"],
-      "companies": ["Example"],
-      "locations": ["New York"],
-      "terms": ["Summer 2027"],
-      "keep_unknown_terms": true,
-      "webhook_env": "DISCORD_WEBHOOK_URL_EXAMPLE",
-      "follow_up_days": 14
-    }
-  },
-  "max_discord_per_run": 50,
-  "dedup_days": 30,
-  "follow_up_days": 14,
-  "keep_unknown_terms": true
+  "category_terms": {
+    "quant": ["quantitative", "quant developer", "quant researcher", "quant trading", "trading", "algo trading"],
+    "general": ["software", "swe", "backend", "machine learning", "..."]
+  }
 }
 ```
 
+A posting is tagged `quant` if its title matches any `quant` keyword,
+`general` if it matches any `general` keyword, both if it matches both, and
+defaults to `general` if it matches neither (so every job lands in a
+digest section).
+
 ## Durable state
 
-These files are runtime state. GitHub Actions persists them after each run; local runs write them beside the scripts.
+These files are runtime state. GitHub Actions persists them after each run;
+local runs write them beside the scripts.
 
 | File | Contents |
 | --- | --- |
 | `seen.json` | Previously observed source posting IDs |
 | `delivery_state.json` | Known identities, 30-day fingerprints, legacy `norm:` entries ignored but retained, and pending per-destination queues |
-| `message_map.json` | Recent Discord message IDs and jobs used for 📌 scans |
-| `notion_state.json` | Notion database IDs, users, applied cursor, `pending_applied`, and `pending_pins` |
+| `notion_state.json` | Notion master database id, dead-posting sweep timestamp, stats callout block id |
 | `health.json` | Last completed scan, source successes/failures, matching and new counts, pending deliveries, and sync errors |
 
-`health.json` is also the run's operational summary: a source failure, pending delivery, or Notion sync error is reported explicitly and retried through durable state.
+`health.json` is also the run's operational summary: a source failure,
+pending delivery, or Notion sync error is reported explicitly and retried
+through durable state.
+
+`message_map.json` is a leftover from the Discord-based delivery this
+project used before; nothing reads or writes it anymore, and it can be
+deleted whenever you like.
 
 ## Local run
 
@@ -111,12 +175,17 @@ python watcher.py --dry-run
 python watcher.py
 ```
 
-Run the tests with `python3 -m unittest discover -s tests -v` and `node --test internship-pinger/worker.test.js`. The workflow always uploads the five state files as a recovery artifact with seven-day retention. Its persistence step always runs, makes up to three rebase/push attempts, and preserves the artifact if a rebase conflict prevents pushing. Do not assume the scheduled workflow runs exactly every ten minutes.
+Run the tests with `python3 -m unittest discover -s tests -v` and
+`node --test internship-pinger/worker.test.js`. The workflow always uploads
+the state files as a recovery artifact with seven-day retention. Its
+persistence step always runs, makes up to three rebase/push attempts, and
+preserves the artifact if a rebase conflict prevents pushing. Do not assume
+the scheduled workflow runs exactly every ten minutes.
 
 ## Troubleshooting
 
 - A 404 for a board usually means its ATS slug changed. Verify it before editing `config.json`.
 - A nonzero pending count in `health.json` means a destination will be retried on a later run.
-- A duplicate Discord post can result from an accepted webhook request whose response timed out. The queue preserves work for retry; it does not claim exactly-once delivery.
-- Deleting state files causes history to be reconsidered. Preserve `seen.json`, `delivery_state.json`, `message_map.json`, and `notion_state.json` unless you intentionally want to reprocess work.
+- Deleting state files causes history to be reconsidered. Preserve `seen.json`, `delivery_state.json`, and `notion_state.json` unless you intentionally want to reprocess work.
 - Old Notion rows and saved history remain valid. Rows whose URL was previously damaged by an older version are not automatically reconstructed.
+- If a row's `Status` is `Applied` but `Applied On`/`Follow-up` look empty, wait for the next run — the reconciliation sweep only runs as part of a normal watcher invocation (or `notion_sync.py` run directly).

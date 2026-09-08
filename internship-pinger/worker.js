@@ -2,6 +2,8 @@ const DEFAULT_REPO = "avyukthNarra/-internship-watcher";
 const WORKFLOW = "watch.yml";
 const RUNS_PER_REQUEST = 10;
 const STALE_AFTER_MS = 30 * 60 * 1000;
+const NOTION_API = "https://api.notion.com/v1";
+const HEALTH_ICON = "🩺";
 
 function githubHeaders(env) {
   return {
@@ -87,16 +89,62 @@ async function dispatchWorkflow(env, headers) {
   }
 }
 
+function notionHeaders(env) {
+  return {
+    Authorization: `Bearer ${env.NOTION_TOKEN}`,
+    "Notion-Version": "2022-06-28",
+    "Content-Type": "application/json",
+  };
+}
+
+// Finds the persistent health callout by its icon rather than storing a
+// block id anywhere — the worker keeps no state between invocations.
+async function findHealthBlock(env) {
+  let cursor;
+  for (let page = 0; page < 5; page += 1) {
+    const url = `${NOTION_API}/blocks/${env.NOTION_PARENT_PAGE_ID}/children?page_size=100` +
+      (cursor ? `&start_cursor=${cursor}` : "");
+    let response;
+    try {
+      response = await fetch(url, { headers: notionHeaders(env), signal: timeoutSignal() });
+    } catch (error) {
+      return null;
+    }
+    if (!response.ok) return null;
+    const payload = await response.json();
+    const found = (payload.results || []).find(
+      (b) => b.type === "callout" && b.callout?.icon?.emoji === HEALTH_ICON,
+    );
+    if (found) return found.id;
+    if (!payload.has_more) return null;
+    cursor = payload.next_cursor;
+  }
+  return null;
+}
+
 async function deliverAlert(env, content) {
-  if (!env.DISCORD_WEBHOOK_URL) {
-    console.log("alert delivery skipped: DISCORD_WEBHOOK_URL is not configured");
+  if (!env.NOTION_TOKEN || !env.NOTION_PARENT_PAGE_ID) {
+    console.log("alert delivery skipped: NOTION_TOKEN/NOTION_PARENT_PAGE_ID is not configured");
     return false;
   }
+  const rich = [{ type: "text", text: { content: content.slice(0, 1900) } }];
   try {
-    const response = await fetch(env.DISCORD_WEBHOOK_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ content }),
+    const blockId = await findHealthBlock(env);
+    const url = blockId
+      ? `${NOTION_API}/blocks/${blockId}`
+      : `${NOTION_API}/blocks/${env.NOTION_PARENT_PAGE_ID}/children`;
+    const body = blockId
+      ? { callout: { rich_text: rich } }
+      : {
+          children: [{
+            object: "block", type: "callout",
+            callout: { rich_text: rich, icon: { type: "emoji", emoji: HEALTH_ICON } },
+          }],
+        };
+    const response = await fetch(url, {
+      method: "PATCH",
+      headers: notionHeaders(env),
+      body: JSON.stringify(body),
       signal: timeoutSignal(),
     });
     if (!response.ok) {
@@ -138,13 +186,15 @@ export async function runScheduled(event, env = {}) {
     }
   }
 
-  if (problems.length && reminder) {
-    await deliverAlert(env, problems.join("\n"));
+  if (reminder) {
+    const text = `${HEALTH_ICON} Watcher health\n` +
+      (problems.length ? problems.join("\n") : "✅ All systems normal.");
+    await deliverAlert(env, text);
   }
   return { reminder, problems };
 }
 
-export { DEFAULT_REPO, WORKFLOW, STALE_AFTER_MS, isHourlyReminder, failureStreak };
+export { DEFAULT_REPO, WORKFLOW, STALE_AFTER_MS, HEALTH_ICON, isHourlyReminder, failureStreak };
 
 export default {
   async scheduled(event, env, ctx) {
