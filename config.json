@@ -23,7 +23,10 @@
     "phd",
     "ph.d",
     " mba",
-    "mba "
+    "mba ",
+    "research scientist",
+    "trading",
+    "trader"
   ],
   "exclude_locations": [
     "canada",
@@ -989,9 +992,6 @@
   "simplify": {
     "enabled": true,
     "terms": [
-      "Fall 2026",
-      "Winter 2027",
-      "Spring 2027",
       "Summer 2027"
     ],
     "max_age_days": 7,
@@ -1079,9 +1079,6 @@
   "smtp_host": "smtp.gmail.com",
   "smtp_port": 587,
   "terms": [
-    "Fall 2026",
-    "Winter 2027",
-    "Spring 2027",
     "Summer 2027"
   ],
   "keep_unknown_terms": true,
@@ -1091,10 +1088,7 @@
     "quant": [
       "quantitative",
       "quant developer",
-      "quant researcher",
-      "quant trading",
-      "trading",
-      "algo trading"
+      "quant researcher"
     ],
     "general": [
       "software",
