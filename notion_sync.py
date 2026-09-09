@@ -35,7 +35,7 @@ from pathlib import Path
 
 import requests
 
-from job_utils import canonical_url, job_identity, load_json, save_json
+from job_utils import canonical_url, job_identity, load_json, save_json, DEFAULT_CATEGORY
 
 _PAGE_CACHE = {}
 SYNC_ERRORS = []
@@ -103,7 +103,13 @@ def _notion(method, path, payload=None):
     return None
 
 
-def _create_db(parent_page_id, title):
+# Cycled across categories in the order given; repeats if there are more
+# categories than colors. Notion also auto-creates any option name it hasn't
+# seen yet, so an uncolored/late-added category still works, just undecorated.
+_CATEGORY_COLORS = ("purple", "blue", "green", "orange", "pink", "yellow", "red", "brown", "gray")
+
+
+def _create_db(parent_page_id, title, categories=()):
     props = {
         "Role": {"title": {}},
         "Company": {"rich_text": {}},
@@ -111,8 +117,8 @@ def _create_db(parent_page_id, title):
         "Link": {"url": {}},
         "Source": {"select": {}},
         "Category": {"multi_select": {"options": [
-            {"name": "Quant", "color": "purple"},
-            {"name": "General", "color": "blue"},
+            {"name": name, "color": _CATEGORY_COLORS[i % len(_CATEGORY_COLORS)]}
+            for i, name in enumerate(categories)
         ]}},
         "Added": {"date": {}},
         "Status": {"select": {"options": STATUS_OPTIONS}},
@@ -135,7 +141,7 @@ def _add_row(db_id, job, status=None):
         "Location": {"rich_text": [{"text": {"content": (job.get("location") or "")[:200]}}]},
         "Link": {"url": job["url"] or None},
         "Source": {"select": {"name": source}},
-        "Category": {"multi_select": [{"name": c.capitalize()} for c in job.get("categories", [])]},
+        "Category": {"multi_select": [{"name": c} for c in job.get("categories", [])]},
         "Added": {"date": {"start": datetime.now(timezone.utc).strftime("%Y-%m-%d")}},
     }
     if status:
@@ -435,12 +441,23 @@ def _upsert_row(db, job, status=None, follow_up_days=14):
     return page
 
 
-def log_master(job):
+def _ensure_master_db(cfg):
+    """Creates the master database on first use, with a Category multi-select
+    option pre-declared for every category in config.json's category_terms
+    (plus the DEFAULT_CATEGORY fallback) so the property looks right even
+    before any row uses a given category."""
     state = _state()
     if not state.get("master_db"):
+        categories = list(cfg.get("category_terms", {}).keys()) + [DEFAULT_CATEGORY]
         state["master_db"] = _create_db(os.environ["NOTION_PARENT_PAGE_ID"],
-                                        "All Internship Postings")
+                                        "All Internship Postings", categories)
         _save(state)
+    return state
+
+
+def log_master(job):
+    cfg = load_json(ROOT / "config.json", {})
+    state = _ensure_master_db(cfg)
     if not state.get("master_db"):
         return False
     return bool(_upsert_row(state["master_db"], job, status="Saved"))
@@ -483,11 +500,7 @@ def _cli_applied(url, cfg=None):
     """`--applied <url>`: log an ad-hoc application the watcher never
     surfaced, reusing the ATS-API/HTML-metadata parser as-is."""
     cfg = cfg or load_json(ROOT / "config.json", {})
-    state = _state()
-    if not state.get("master_db"):
-        state["master_db"] = _create_db(os.environ["NOTION_PARENT_PAGE_ID"],
-                                        "All Internship Postings")
-        _save(state)
+    state = _ensure_master_db(cfg)
     if not state.get("master_db"):
         print("Could not create or find the master database.")
         return 1

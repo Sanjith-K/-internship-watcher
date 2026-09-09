@@ -9,7 +9,7 @@ import requests
 import watcher
 import notion_sync as notion
 from job_utils import (canonical_url, job_identity, fingerprint, term_matches,
-                       categorize, load_json)
+                       categorize, load_json, DEFAULT_CATEGORY)
 
 
 def job(jid='greenhouse:example:123', **kwargs):
@@ -86,26 +86,30 @@ class IdentityTests(unittest.TestCase):
 
 class CategoryTests(unittest.TestCase):
     TERMS = {
-        'quant': ['quantitative', 'quant developer', 'quant researcher', 'quant trading',
-                  'trading', 'algo trading'],
-        'general': ['software', 'machine learning'],
+        'Quant': ['quantitative', 'quant developer', 'quant researcher'],
+        'SWE': ['software', 'backend'],
+        'Machine Learning': ['machine learning'],
     }
 
     def test_quant_only_title(self):
-        j = job(title='Quantitative Trading Intern')
-        self.assertEqual(categorize(j, self.TERMS), ['quant'])
+        j = job(title='Quantitative Developer Intern')
+        self.assertEqual(categorize(j, self.TERMS), ['Quant'])
 
-    def test_general_only_title(self):
+    def test_swe_only_title(self):
         j = job(title='Software Engineering Intern')
-        self.assertEqual(categorize(j, self.TERMS), ['general'])
+        self.assertEqual(categorize(j, self.TERMS), ['SWE'])
 
-    def test_matches_both(self):
+    def test_matches_multiple_categories(self):
         j = job(title='Quantitative Software Engineer Intern')
-        self.assertEqual(categorize(j, self.TERMS), ['general', 'quant'])
+        self.assertEqual(categorize(j, self.TERMS), ['Quant', 'SWE'])
 
-    def test_matches_neither_defaults_to_general(self):
+    def test_matches_none_defaults_to_other(self):
         j = job(title='Product Management Intern')
-        self.assertEqual(categorize(j, self.TERMS), ['general'])
+        self.assertEqual(categorize(j, self.TERMS), [DEFAULT_CATEGORY])
+
+    def test_arbitrary_category_names_are_used_verbatim(self):
+        j = job(title='Machine Learning Intern')
+        self.assertEqual(categorize(j, self.TERMS), ['Machine Learning'])
 
     def test_discover_attaches_categories(self):
         cfg = {
@@ -115,11 +119,11 @@ class CategoryTests(unittest.TestCase):
             'simplify': {'enabled': False}, 'jobright': {'enabled': False},
             'category_terms': self.TERMS,
         }
-        feed = [{'id': 'greenhouse:quantco:1', 'title': 'Quant Trading Intern',
+        feed = [{'id': 'greenhouse:quantco:1', 'title': 'Quant Developer Intern',
                  'location': 'NYC', 'url': 'https://boards.greenhouse.io/quantco/jobs/1'}]
         with patch.object(watcher, 'ATS_FETCHERS', {'greenhouse': lambda org: feed}):
             [found] = watcher.discover(cfg)
-        self.assertEqual(found['categories'], ['quant'])
+        self.assertEqual(found['categories'], ['Quant'])
 
 
 class DeliveryTests(unittest.TestCase):
@@ -217,19 +221,25 @@ class DeliveryTests(unittest.TestCase):
 
 class DigestTests(unittest.TestCase):
     def test_digest_groups_by_category_and_lists_both_for_dual_tagged(self):
-        quant_job = job('q', title='Quant Trading Intern', categories=['quant'])
-        general_job = job('g', title='SWE Intern', categories=['general'])
-        both_job = job('b', title='Quant SWE Intern', categories=['quant', 'general'])
-        body = watcher._digest_body([quant_job, general_job, both_job])
+        quant_job = job('q', title='Quant Developer Intern', categories=['Quant'])
+        swe_job = job('s', title='SWE Intern', categories=['SWE'])
+        both_job = job('b', title='Quant SWE Intern', categories=['Quant', 'SWE'])
+        body = watcher._digest_body([quant_job, swe_job, both_job])
         self.assertIn('=== Quant (2) ===', body)
-        self.assertIn('=== General (2) ===', body)
+        self.assertIn('=== SWE (2) ===', body)
 
-    def test_missing_categories_defaults_to_general_section(self):
-        j = job()
-        j.pop('categories', None)
+    def test_arbitrary_category_gets_its_own_section(self):
+        j = job(title='Data Analyst Intern', categories=['Data Analytics'])
         body = watcher._digest_body([j])
-        self.assertIn('=== General (1) ===', body)
-        self.assertNotIn('Quant', body)
+        self.assertIn('=== Data Analytics (1) ===', body)
+
+    def test_missing_categories_defaults_to_other_section_last(self):
+        other_job = job('o')
+        other_job.pop('categories', None)
+        swe_job = job('s', title='SWE Intern', categories=['SWE'])
+        body = watcher._digest_body([swe_job, other_job])
+        self.assertIn(f'=== {DEFAULT_CATEGORY} (1) ===', body)
+        self.assertLess(body.index('=== SWE'), body.index(f'=== {DEFAULT_CATEGORY}'))
 
 
 class NotionTests(unittest.TestCase):

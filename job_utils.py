@@ -88,18 +88,19 @@ def fingerprint(job):
     return hashlib.sha256(json.dumps(normalized).encode()).hexdigest()
 
 
+DEFAULT_CATEGORY = "Other"
+
+
 def categorize(job, category_terms):
-    """Field-based category tags: a title can match quant terms, general
-    terms, both, or neither (falls back to general so every job is grouped
-    somewhere for delivery)."""
+    """Field-based category tags: a title is checked against every category's
+    keyword list in config.json's category_terms (arbitrary names, e.g.
+    "Quant", "SWE", "Data Science" — used verbatim as display labels and
+    Notion multi-select option names). A title can match one, several, or
+    none; matching none falls back to DEFAULT_CATEGORY so every job is
+    grouped somewhere for delivery."""
     title = job.get('title', '').lower()
-    quant_kw = category_terms.get('quant', [])
-    general_kw = category_terms.get('general', [])
-    cats = set()
-    if any(k.lower() in title for k in quant_kw):
-        cats.add('quant')
-    if any(k.lower() in title for k in general_kw):
-        cats.add('general')
+    cats = {name for name, keywords in category_terms.items()
+            if any(k.lower() in title for k in keywords)}
     if not cats:
-        cats.add('general')
+        cats.add(DEFAULT_CATEGORY)
     return sorted(cats)

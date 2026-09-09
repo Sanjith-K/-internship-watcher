@@ -18,11 +18,13 @@ Each watcher run:
    backward-compatible fallback only when top-level `terms` is absent.
    `keep_unknown_terms` controls whether a posting with no recognizable
    season term is retained and defaults to keeping unknown terms.
-3. Tags each match with a category — `quant`, `general`, or both — based on
-   title keywords in `config.json`'s `category_terms.quant` /
-   `category_terms.general` lists. A job matching neither defaults to
-   `general` so nothing is left ungrouped. The category is stored on the job
-   record (`categories`), so downstream delivery never re-derives it.
+3. Tags each match with one or more categories based on title keywords in
+   `config.json`'s `category_terms` (an arbitrary set of names — currently
+   Quant, SWE, Data Science, Data Analytics, Machine Learning, Data
+   Engineering, Security, Hardware — you can rename, add, or remove any of
+   them). A job matching none of them defaults to `Other` so nothing is left
+   ungrouped. The category set is stored on the job record (`categories`),
+   so downstream delivery never re-derives it.
 4. Identifies postings by ATS identity or canonical URL. Known campaign
    parameters are removed, while other URL query parameters are preserved
    because they may identify the job. Exact identities remain known
@@ -32,8 +34,9 @@ Each watcher run:
 5. Places each new job into `delivery_state.json` with its individual
    destinations (`email` and/or `notion`, depending on which credentials are
    configured). Undelivered destinations remain queued for a later run.
-6. Delivers a single email digest per run — grouped into Quant and General
-   sections — and upserts each job into the Notion master log.
+6. Delivers a single email digest per run — one section per category, in
+   alphabetical order with `Other` last — and upserts each job into the
+   Notion master log.
 
 The watcher checkpoints intent before external delivery and uses atomic JSON
 writes.
@@ -48,8 +51,9 @@ writing an hourly health status to a Notion callout. See
 The Notion database **All Internship Postings** is both the master log and
 the personal tracker — there's only one user, so there's no separate
 per-person database. Every new posting is upserted with `Status = Saved` and
-a `Category` (Quant/General, multi-select so a job matching both keeps both
-tags).
+a `Category` (multi-select, one option per name in `config.json`'s
+`category_terms` plus `Other` — a job matching multiple categories keeps all
+of them).
 
 Promote a row by hand in Notion: change `Status` to `Applied`, `OA`,
 `Interview`, `Offer`, or `Rejected` as your pipeline for that job moves. This
@@ -109,9 +113,10 @@ Create an internal integration at [notion.so/my-integrations](https://www.notion
 
 Set `SMTP_USER`, `SMTP_PASS`, and optionally `ALERT_EMAIL`; `SMTP_HOST` and
 `SMTP_PORT` can be configured in `config.json` or the environment. Email is
-the primary glance-and-go surface: one digest per run, grouped into Quant and
-General sections, listing every new posting found that run. There's no
-digest batching across runs — if a run finds nothing new, no email is sent.
+the primary glance-and-go surface: one digest per run, with one section per
+category (alphabetical, `Other` last), listing every new posting found that
+run. There's no digest batching across runs — if a run finds nothing new, no
+email is sent.
 
 ### Dry runs and credentials
 
@@ -125,28 +130,41 @@ delivery destination.
 
 `config.json` contains the 178 `companies` entries plus explicit defaults
 for `terms`, `keep_unknown_terms`, `dedup_days` (30), `follow_up_days` (14),
-and `category_terms` (the `quant`/`general` keyword lists used for category
-tagging). It also contains the SimplifyJobs and Jobright feed settings. Add
-a board only after verifying its slug with `verify_boards.py`; unsupported
-or stale slugs can return 404. The configured `exclude_locations` list uses
-word-boundary matching and keeps locations that clearly contain a US state
-or USA. Empty or unknown locations are retained.
+and `category_terms` (the keyword lists used for category tagging). It also
+contains the SimplifyJobs and Jobright feed settings. Add a board only after
+verifying its slug with `verify_boards.py`; unsupported or stale slugs can
+return 404. The configured `exclude_locations` list uses word-boundary
+matching and keeps locations that clearly contain a US state or USA. Empty
+or unknown locations are retained.
 
-`category_terms` looks like:
+`category_terms` is a plain object: each key is a category name (used
+verbatim as the digest section header and the Notion `Category` option — no
+need to match any particular casing or format), and each value is a list of
+title keywords. Currently:
 
 ```json
 {
   "category_terms": {
-    "quant": ["quantitative", "quant developer", "quant researcher", "quant trading", "trading", "algo trading"],
-    "general": ["software", "swe", "backend", "machine learning", "..."]
+    "Quant": ["quantitative", "quant developer", "quant researcher"],
+    "SWE": ["software", "swe", "backend", "frontend", "..."],
+    "Data Science": ["data science", "data scientist", "research engineer", "applied scientist"],
+    "Data Analytics": ["data analyst", "data analytics", "business intelligence", "analytics engineer"],
+    "Machine Learning": ["machine learning", "ml engineer", "ai engineer", "computer vision", "nlp", "..."],
+    "Data Engineering": ["data engineer", "data engineering"],
+    "Security": ["security engineer", "cybersecurity", "infosec", "..."],
+    "Hardware": ["hardware engineer", "embedded", "firmware"]
   }
 }
 ```
 
-A posting is tagged `quant` if its title matches any `quant` keyword,
-`general` if it matches any `general` keyword, both if it matches both, and
-defaults to `general` if it matches neither (so every job lands in a
-digest section).
+A posting is tagged with the name of every category whose keyword list it
+matches — none, one, or several (e.g. an embedded-software role can land in
+both `Hardware` and `SWE`). A posting matching none of them defaults to
+`Other` so every job still lands in a digest section and gets a `Category`
+value in Notion. Add, rename, or remove categories freely — `categorize()`
+in `job_utils.py` and the email/Notion delivery code have no hardcoded
+category names, so a `category_terms` edit alone is enough (no code
+changes needed).
 
 ## Durable state
 

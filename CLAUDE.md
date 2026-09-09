@@ -4,11 +4,12 @@
 
 A personal internship alert and application-tracking system. The main
 watcher reads 178 configured company boards plus SimplifyJobs and Jobright
-feeds, filters every source, tags each match with a category (quant/
-general), and routes new postings to a per-run email digest and a single
-Notion database. It can run from GitHub Actions or locally. The GitHub
-`*/10` schedule is best effort and must not be documented as a ten-minute
-guarantee.
+feeds, filters every source, tags each match with one or more categories
+(Quant, SWE, Data Science, Data Analytics, Machine Learning, Data
+Engineering, Security, Hardware, or Other), and routes new postings to a
+per-run email digest and a single Notion database. It can run from GitHub
+Actions or locally. The GitHub `*/10` schedule is best effort and must not
+be documented as a ten-minute guarantee.
 
 The `internship-pinger` Cloudflare Worker is now in this repository. It
 triggers `watch.yml`, monitors completed main-branch runs, and writes an
@@ -20,7 +21,7 @@ repository.
 
 - `watcher.py` fetches the configured Greenhouse, Lever, and Ashby boards and the enabled aggregate feeds.
 - Filtering applies to all sources. Top-level `terms` is the season filter for every source; `simplify.terms` is only a backward-compatible fallback when top-level `terms` is absent. Unknown season terms are retained by default and can be controlled with `keep_unknown_terms`.
-- Category tagging is per-*match*, not per-company: `job_utils.categorize()` checks a job's title against `config.json`'s `category_terms.quant`/`category_terms.general` keyword lists. A job can be tagged `quant`, `general`, or both; matching neither defaults to `general`. `watcher.discover()` attaches `job["categories"]` before dedup, so it's stored in state and never re-derived downstream. The same company can produce both quant and general jobs depending on which posting matched.
+- Category tagging is per-*match*, not per-company: `job_utils.categorize()` checks a job's title against every category's keyword list in `config.json`'s `category_terms` — an arbitrary set of category names (currently Quant, SWE, Data Science, Data Analytics, Machine Learning, Data Engineering, Security, Hardware), used verbatim as digest section headers and Notion `Category` option names. Nothing in `job_utils.categorize()`, `watcher._digest_body()`, or `notion_sync.py`'s `_create_db()`/`_add_row()` hardcodes a specific category list — adding/renaming/removing a category is a `config.json` edit only, no code changes. A job can match zero, one, or several categories; matching none falls back to `job_utils.DEFAULT_CATEGORY` ("Other") so nothing is left ungrouped. `watcher.discover()` attaches `job["categories"]` before dedup, so it's stored in state and never re-derived downstream. The same company can produce jobs in several different categories depending on which posting matched (e.g. Neuralink's embedded-systems postings tag both Hardware and SWE).
 - `job_utils.py` canonicalizes URLs while preserving meaningful query parameters. Exact job identities persist. Cross-source fuzzy fingerprints expire after `dedup_days` (default 30). Legacy `norm:` entries in state are ignored for matching, not removed.
 - `delivery_state.json` is the durable per-destination queue for `email` and `notion`. Notion delivery is per-job (one failure doesn't block the batch); email is a single per-run digest grouped by category, sent once for every job still pending email delivery in that run, not one send per job.
 - `health.json` records the last completed scan, source health, pending deliveries, and sync errors. A failed run leaves checkpointed work for retry.
@@ -29,7 +30,7 @@ repository.
 - A periodic reconciliation sweep (`_reconcile_applied_status`) backfills `Applied On`/`Follow-up` whenever it finds a row at `Status = Applied` with no `Applied On` yet — this is what replaces the Discord applied-link parsing. `follow_up_days` defaults to 14 (single top-level config value now, since there are no more per-Discord-user profile overrides); `0` disables the follow-up date.
 - For an application to a job the watcher never surfaced, `python notion_sync.py --applied <url>` reuses the ATS-API/HTML-metadata parser (`_parse_job_from_url`, `_ats_api`, and friends — kept verbatim from the old applied-channel implementation) to resolve company/role/location and upsert an `Applied` row.
 - Notion upserts query existing rows by canonical job identity, including legacy rows, so existing history does not need a reseed migration. Previously stripped URLs are not automatically repairable.
-- Config defaults include explicit `terms`, `keep_unknown_terms`, `dedup_days` 30, `follow_up_days` 14, and `category_terms` (quant/general keyword lists). There is no `profiles` config anymore — it existed only to route different people's Discord webhooks, which no longer applies to this single-user tool.
+- Config defaults include explicit `terms` (currently `["Summer 2027"]` only — narrowed from the original four terms), `keep_unknown_terms`, `dedup_days` 30, `follow_up_days` 14, and `category_terms` (per-category keyword lists, see above). `exclude_keywords` also blocks `"trading"`, `"trader"`, and `"research scientist"` outright — those postings never surface at all, not just get uncategorized; this is deliberate (personal preference: quant interest is in the software/data-science side, not trading-desk roles), so `category_terms.Quant`'s own keyword list only has `"quantitative"`, `"quant developer"`, `"quant researcher"` — no trading-flavored terms, since a trading title would never survive the exclude filter to reach categorization anyway. There is no `profiles` config anymore — it existed only to route different people's Discord webhooks, which no longer applies to this single-user tool.
 
 ## Deployment facts
 

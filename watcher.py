@@ -26,7 +26,7 @@ from pathlib import Path
 import requests
 
 from job_utils import (load_json, save_json, canonical_url, job_identity,
-                       fingerprint, term_matches, categorize)
+                       fingerprint, term_matches, categorize, DEFAULT_CATEGORY)
 
 ROOT = Path(__file__).parent
 CONFIG_PATH = ROOT / "config.json"
@@ -267,17 +267,17 @@ def fetch_jobright(cfg):
 
 # ------------------------------------------------------------ notifications
 
-CATEGORY_LABELS = {"quant": "Quant", "general": "General"}
-
-
 def _digest_body(jobs):
-    """Group jobs by category so the digest reads as Quant / General
-    sections; a job tagged both appears in both sections."""
+    """Group jobs by category so the digest reads as one section per
+    category (alphabetical, DEFAULT_CATEGORY last); a job tagged with
+    several categories appears in each of their sections. The category set
+    itself is whatever config.json's category_terms defines — nothing here
+    is hardcoded to a specific list of categories."""
+    present = {c for j in jobs for c in (j.get("categories") or [DEFAULT_CATEGORY])}
+    order = sorted(present - {DEFAULT_CATEGORY}) + ([DEFAULT_CATEGORY] if DEFAULT_CATEGORY in present else [])
     sections = []
-    for key, label in CATEGORY_LABELS.items():
-        in_section = [j for j in jobs if key in (j.get("categories") or ["general"])]
-        if not in_section:
-            continue
+    for label in order:
+        in_section = [j for j in jobs if label in (j.get("categories") or [DEFAULT_CATEGORY])]
         lines = [f"=== {label} ({len(in_section)}) ==="]
         for j in in_section:
             lines.append(f"{j['company']} — {j['title']}")

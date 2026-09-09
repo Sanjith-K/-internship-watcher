@@ -1085,12 +1085,12 @@
   "dedup_days": 30,
   "follow_up_days": 14,
   "category_terms": {
-    "quant": [
+    "Quant": [
       "quantitative",
       "quant developer",
       "quant researcher"
     ],
-    "general": [
+    "SWE": [
       "software",
       "swe",
       "backend",
@@ -1099,32 +1099,53 @@
       "front end",
       "full stack",
       "fullstack",
+      "web developer",
+      "product engineer",
       "systems",
       "infrastructure",
       "platform",
       "site reliability",
       "devops",
-      "security engineer",
+      "cloud",
+      "mobile",
+      "ios",
+      "android"
+    ],
+    "Data Science": [
       "data science",
-      "data engineer",
-      "data engineering",
+      "data scientist",
+      "research engineer",
+      "applied scientist"
+    ],
+    "Data Analytics": [
+      "data analyst",
+      "data analytics",
+      "business intelligence",
+      "analytics engineer"
+    ],
+    "Machine Learning": [
       "machine learning",
       "ml engineer",
       "ai engineer",
       "artificial intelligence",
-      "research engineer",
-      "applied scientist",
-      "mobile",
-      "ios",
-      "android",
       "computer vision",
       "nlp",
-      "cloud",
-      "embedded",
-      "firmware",
+      "deep learning"
+    ],
+    "Data Engineering": [
+      "data engineer",
+      "data engineering"
+    ],
+    "Security": [
+      "security engineer",
+      "cybersecurity",
+      "infosec",
+      "security intern"
+    ],
+    "Hardware": [
       "hardware engineer",
-      "web developer",
-      "product engineer"
+      "embedded",
+      "firmware"
     ]
   }
 }
