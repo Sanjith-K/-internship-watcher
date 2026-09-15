@@ -80,9 +80,11 @@ time-since in the digest) idempotently on first poll.
 2. Under **Bot**, create a bot, copy its token (`DISCORD_BOT_TOKEN`), and
    invite it to your server with the `Send Messages` and `Embed Links`
    permissions. You'll also need the channel ID you want it posting to
-   (`DISCORD_CHANNEL_ID`) and the application's `Application ID`
-   (`DISCORD_APPLICATION_ID`) and `Public Key` (`DISCORD_PUBLIC_KEY`), both
-   on the application's **General Information** page.
+   (`DISCORD_CHANNEL_ID`) and the application's `Public Key`
+   (`DISCORD_PUBLIC_KEY`), on the application's **General Information**
+   page. (The Application ID on that same page isn't needed anywhere in
+   this codebase — there's nothing here that calls Discord's application-
+   command API.)
 3. **There are no slash commands to register.** Every interaction here is a
    button on a message the bot posts itself (Approve/Reject/Edit) — Discord
    doesn't require any registration step for message components, only for
@@ -114,7 +116,6 @@ and read it from `env` instead.
 npm install
 wrangler kv namespace create PENDING_APPROVALS   # paste the resulting id into wrangler.toml
 wrangler secret put DISCORD_BOT_TOKEN
-wrangler secret put DISCORD_APPLICATION_ID
 wrangler secret put DISCORD_PUBLIC_KEY
 wrangler secret put DISCORD_CHANNEL_ID
 wrangler secret put NOTION_TOKEN

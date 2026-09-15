@@ -2,7 +2,6 @@ export interface Env {
   NOTION_TOKEN: string;
   NOTION_PARENT_PAGE_ID: string;
   DISCORD_BOT_TOKEN: string;
-  DISCORD_APPLICATION_ID: string;
   DISCORD_PUBLIC_KEY: string;
   DISCORD_CHANNEL_ID: string;
   APPLY_WORKFLOW: Workflow;

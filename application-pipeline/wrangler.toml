@@ -21,7 +21,7 @@ class_name = "ApplyWorkflow"
 # the right amount of infrastructure for it.
 [[kv_namespaces]]
 binding = "PENDING_APPROVALS"
-id = "REPLACE_WITH_YOUR_KV_NAMESPACE_ID"
+id = "80fbcd04e0b84c9faeef7ecc80f75377"
 
 # Native Workers AI binding for drafting free-text answers. No secret
 # needed — billed through the same Cloudflare account as everything else.
