@@ -1,7 +1,10 @@
 name = "application-pipeline"
 main = "src/index.ts"
 compatibility_date = "2026-07-01"
-workers_dev = false
+# Unlike internship-pinger (cron-only, no public URL needed), this Worker's
+# fetch() handler IS the Discord Interactions endpoint — it must be
+# publicly reachable over HTTPS for Discord to call it.
+workers_dev = true
 
 # Every 10 minutes: poll Notion for Status=Saved rows and start a new
 # ApplyWorkflow instance for each one that doesn't have one yet.
