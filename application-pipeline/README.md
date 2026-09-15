@@ -105,10 +105,12 @@ the database itself.
 
 ### 3. Your profile
 
-Edit `src/profile.ts` before deploying — it's your name/email/resume
-link/etc. used to fill deterministic form fields. Nothing in it is a
-credential, but move any field you don't want committed into a Wrangler var
-and read it from `env` instead.
+Edit `src/profile.ts` before deploying — it's your name/resume link/etc.
+used to fill deterministic form fields. This repo is a public fork, so
+`phone` and `email` deliberately aren't in this file — they come from the
+`PROFILE_PHONE`/`PROFILE_EMAIL` secrets instead (see `buildProfile()` in
+the same file), since those two have no public presence otherwise. Move
+any other field you'd rather not have committed the same way.
 
 ### 4. Deploy
 
@@ -120,6 +122,8 @@ wrangler secret put DISCORD_PUBLIC_KEY
 wrangler secret put DISCORD_CHANNEL_ID
 wrangler secret put NOTION_TOKEN
 wrangler secret put NOTION_PARENT_PAGE_ID
+wrangler secret put PROFILE_PHONE
+wrangler secret put PROFILE_EMAIL
 npm run deploy
 ```
 

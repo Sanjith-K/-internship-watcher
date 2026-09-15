@@ -4,6 +4,8 @@ export interface Env {
   DISCORD_BOT_TOKEN: string;
   DISCORD_PUBLIC_KEY: string;
   DISCORD_CHANNEL_ID: string;
+  PROFILE_PHONE: string;
+  PROFILE_EMAIL: string;
   APPLY_WORKFLOW: Workflow;
   PENDING_APPROVALS: KVNamespace;
   AI: Ai;

@@ -1,5 +1,5 @@
 import type { FormField, FormSchema } from "./ats-forms";
-import { DETERMINISTIC_MATCHERS, PROFILE } from "./profile";
+import { buildProfile, DETERMINISTIC_MATCHERS, type FullProfile } from "./profile";
 import type { Env } from "./types";
 
 export interface DraftedAnswer {
@@ -19,9 +19,9 @@ export interface DraftResult {
 // if not.
 const DRAFT_MODEL = "@cf/meta/llama-3.1-8b-instruct";
 
-function matchProfileField(label: string): string | null {
+function matchProfileField(profile: FullProfile, label: string): string | null {
   for (const [pattern, key] of DETERMINISTIC_MATCHERS) {
-    if (pattern.test(label)) return PROFILE[key];
+    if (pattern.test(label)) return profile[key];
   }
   return null;
 }
@@ -48,13 +48,14 @@ export async function draftApplication(
   title: string,
   schema: FormSchema,
 ): Promise<DraftResult> {
+  const profile = buildProfile(env);
   const answers: DraftedAnswer[] = [];
   for (const field of schema.fields) {
     if (field.type === "file") {
-      answers.push({ field, value: PROFILE.resumeUrl, source: "profile" });
+      answers.push({ field, value: profile.resumeUrl, source: "profile" });
       continue;
     }
-    const profileValue = matchProfileField(field.label);
+    const profileValue = matchProfileField(profile, field.label);
     if (profileValue) {
       answers.push({ field, value: profileValue, source: "profile" });
       continue;

@@ -1,22 +1,28 @@
-// Your own answers for deterministic form fields. Fill this in once before
-// deploying. Nothing here is a secret in the credential sense, but if you'd
-// rather not commit your phone number/address, move individual fields to
-// Wrangler vars/secrets and read them from env instead — the shape below is
-// just a plain object so that's a trivial swap later.
+import type { Env } from "./types";
+
+// Your own answers for deterministic form fields. This repo is a public
+// fork, so phone and email — the two fields with no public presence
+// elsewhere — come from Wrangler secrets (PROFILE_PHONE / PROFILE_EMAIL)
+// instead of being committed here. Everything else below is fine to commit
+// (already public via LinkedIn/GitHub/your resume link itself).
 export const PROFILE = {
-  firstName: "REPLACE_ME",
-  lastName: "REPLACE_ME",
-  email: "REPLACE_ME@example.com",
-  phone: "REPLACE_ME",
-  linkedin: "https://linkedin.com/in/REPLACE_ME",
-  github: "https://github.com/REPLACE_ME",
-  resumeUrl: "REPLACE_ME", // a hosted URL to your resume file
-  school: "REPLACE_ME",
-  graduationDate: "REPLACE_ME",
+  firstName: "Sanjith",
+  lastName: "Kotaru",
+  linkedin: "https://linkedin.com/in/sanjith-kotaru",
+  github: "https://github.com/Sanjith-K",
+  resumeUrl: "https://drive.google.com/file/d/1D5ueG58roOFJaNdw9GWcXZqFdfB-bFNc/view?usp=sharing", // a hosted URL to your resume file
+  school: "New York University",
+  graduationDate: "Spring 2028",
 };
 
+export function buildProfile(env: Pick<Env, "PROFILE_PHONE" | "PROFILE_EMAIL">) {
+  return { ...PROFILE, phone: env.PROFILE_PHONE, email: env.PROFILE_EMAIL };
+}
+
+export type FullProfile = ReturnType<typeof buildProfile>;
+
 // label keyword -> profile field, checked in order, first match wins.
-export const DETERMINISTIC_MATCHERS: Array<[RegExp, keyof typeof PROFILE]> = [
+export const DETERMINISTIC_MATCHERS: Array<[RegExp, keyof FullProfile]> = [
   [/first\s*name/i, "firstName"],
   [/last\s*name/i, "lastName"],
   [/e-?mail/i, "email"],
