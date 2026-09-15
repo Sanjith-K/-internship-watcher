@@ -23,7 +23,10 @@
     "phd",
     "ph.d",
     " mba",
-    "mba "
+    "mba ",
+    "research scientist",
+    "trading",
+    "trader"
   ],
   "exclude_locations": [
     "canada",
@@ -959,14 +962,36 @@
       "name": "Quora",
       "ats": "ashby",
       "board": "quora"
+    },
+    {
+      "name": "Aquatic Capital Management",
+      "ats": "greenhouse",
+      "board": "aquaticcapitalmanagement"
+    },
+    {
+      "name": "Voloridge Investment Management",
+      "ats": "greenhouse",
+      "board": "voloridgeinvestmentmanagement"
+    },
+    {
+      "name": "Walleye Capital (Quantic)",
+      "ats": "greenhouse",
+      "board": "walleyecapital"
+    },
+    {
+      "name": "TransMarket Group",
+      "ats": "greenhouse",
+      "board": "transmarketgroup"
+    },
+    {
+      "name": "Seven Research",
+      "ats": "greenhouse",
+      "board": "sevenresearch"
     }
   ],
   "simplify": {
     "enabled": true,
     "terms": [
-      "Fall 2026",
-      "Winter 2027",
-      "Spring 2027",
       "Summer 2027"
     ],
     "max_age_days": 7,
@@ -1054,14 +1079,73 @@
   "smtp_host": "smtp.gmail.com",
   "smtp_port": 587,
   "terms": [
-    "Fall 2026",
-    "Winter 2027",
-    "Spring 2027",
     "Summer 2027"
   ],
   "keep_unknown_terms": true,
   "dedup_days": 30,
-  "max_discord_per_run": 50,
   "follow_up_days": 14,
-  "profiles": {}
+  "category_terms": {
+    "Quant": [
+      "quantitative",
+      "quant developer",
+      "quant researcher"
+    ],
+    "SWE": [
+      "software",
+      "swe",
+      "backend",
+      "back end",
+      "frontend",
+      "front end",
+      "full stack",
+      "fullstack",
+      "web developer",
+      "product engineer",
+      "systems",
+      "infrastructure",
+      "platform",
+      "site reliability",
+      "devops",
+      "cloud",
+      "mobile",
+      "ios",
+      "android"
+    ],
+    "Data Science": [
+      "data science",
+      "data scientist",
+      "research engineer",
+      "applied scientist"
+    ],
+    "Data Analytics": [
+      "data analyst",
+      "data analytics",
+      "business intelligence",
+      "analytics engineer"
+    ],
+    "Machine Learning": [
+      "machine learning",
+      "ml engineer",
+      "ai engineer",
+      "artificial intelligence",
+      "computer vision",
+      "nlp",
+      "deep learning"
+    ],
+    "Data Engineering": [
+      "data engineer",
+      "data engineering"
+    ],
+    "Security": [
+      "security engineer",
+      "cybersecurity",
+      "infosec",
+      "security intern"
+    ],
+    "Hardware": [
+      "hardware engineer",
+      "embedded",
+      "firmware"
+    ]
+  }
 }

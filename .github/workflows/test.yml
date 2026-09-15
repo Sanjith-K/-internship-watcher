@@ -7,6 +7,7 @@ on:
       - 'config.json'
       - 'requirements.txt'
       - 'internship-pinger/**'
+      - 'application-pipeline/**'
       - '.github/workflows/test.yml'
 permissions:
   contents: read
@@ -25,3 +26,11 @@ jobs:
         with:
           node-version: '22'
       - run: node --test internship-pinger/worker.test.js
+      - run: npm install --legacy-peer-deps
+        working-directory: application-pipeline
+      - run: npx wrangler types
+        working-directory: application-pipeline
+      - run: npx tsc --noEmit
+        working-directory: application-pipeline
+      - run: npx vitest run
+        working-directory: application-pipeline

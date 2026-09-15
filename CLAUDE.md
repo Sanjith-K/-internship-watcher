@@ -2,23 +2,50 @@
 
 ## What this is
 
-An internship alert and application-tracking system. The main watcher reads 173 configured company boards plus SimplifyJobs and Jobright feeds, filters every source, and routes individual postings to Discord, email, and Notion. It can run from GitHub Actions or locally. The GitHub `*/10` schedule is best effort and must not be documented as a ten-minute guarantee.
+A personal internship alert and application-tracking system. The main
+watcher reads 178 configured company boards plus SimplifyJobs and Jobright
+feeds, filters every source, tags each match with one or more categories
+(Quant, SWE, Data Science, Data Analytics, Machine Learning, Data
+Engineering, Security, Hardware, or Other), and routes new postings to a
+per-run email digest and a single Notion database. It can run from GitHub
+Actions or locally. The GitHub `*/10` schedule is best effort and must not
+be documented as a ten-minute guarantee.
 
-The `internship-pinger` Cloudflare Worker is now in this repository. It triggers `watch.yml`, monitors completed main-branch runs, and sends hourly stale/failure warnings. Keep worker changes and watcher changes conceptually separate; its README and Node test are part of the repository.
+The `internship-pinger` Cloudflare Worker is now in this repository. It
+triggers `watch.yml`, monitors completed main-branch runs, and writes an
+hourly health status to a Notion callout. Keep worker changes and watcher
+changes conceptually separate; its README and Node test are part of the
+repository.
+
+`application-pipeline/` is a third, separate Cloudflare Workers +
+Workflows project that drafts applications from `Status = Saved` Notion
+rows and gates everything on Discord approval before doing anything
+further. It's deliberately decoupled from the Python watcher — communicates
+only through the shared Notion database, never imports Python code or gets
+triggered from `watcher.py`. It brings a Discord bot back into this repo,
+but **only** as an approval-request/response channel (message buttons via
+Discord's HTTP Interactions model, not a Gateway connection, not the old
+📌-reaction tracker) — the Notion `Status` column still owns save-tracking,
+per the earlier Discord-removal decision; this addition doesn't reverse
+that. See `application-pipeline/README.md` for the full design, including
+why there is no automated application-submission code anywhere in it (ToS
+uncertainty for Greenhouse/Lever — flagged explicitly rather than assumed
+safe; approval hands off to a human clicking the real apply link instead).
 
 ## Architecture facts
 
 - `watcher.py` fetches the configured Greenhouse, Lever, and Ashby boards and the enabled aggregate feeds.
-- Filtering applies to all sources. Top-level `terms` is the season filter for every source; `simplify.terms` is only a backward-compatible fallback when top-level `terms` is absent. Unknown season terms are retained by default and can be controlled with `keep_unknown_terms`; profile terms can be configured independently.
+- Filtering applies to all sources. Top-level `terms` is the season filter for every source; `simplify.terms` is only a backward-compatible fallback when top-level `terms` is absent. Unknown season terms are retained by default and can be controlled with `keep_unknown_terms`.
+- Category tagging is per-*match*, not per-company: `job_utils.categorize()` checks a job's title against every category's keyword list in `config.json`'s `category_terms` — an arbitrary set of category names (currently Quant, SWE, Data Science, Data Analytics, Machine Learning, Data Engineering, Security, Hardware), used verbatim as digest section headers and Notion `Category` option names. Nothing in `job_utils.categorize()`, `watcher._digest_body()`, or `notion_sync.py`'s `_create_db()`/`_add_row()` hardcodes a specific category list — adding/renaming/removing a category is a `config.json` edit only, no code changes. A job can match zero, one, or several categories; matching none falls back to `job_utils.DEFAULT_CATEGORY` ("Other") so nothing is left ungrouped. `watcher.discover()` attaches `job["categories"]` before dedup, so it's stored in state and never re-derived downstream. The same company can produce jobs in several different categories depending on which posting matched (e.g. Neuralink's embedded-systems postings tag both Hardware and SWE).
 - `job_utils.py` canonicalizes URLs while preserving meaningful query parameters. Exact job identities persist. Cross-source fuzzy fingerprints expire after `dedup_days` (default 30). Legacy `norm:` entries in state are ignored for matching, not removed.
-- `delivery_state.json` is the durable per-destination queue for Discord, email, and Notion. `max_discord_per_run` defaults to 50. Discord uses individual posts and keeps 📌 pins; there are no digest messages.
+- `delivery_state.json` is the durable per-destination queue for `email` and `notion`. Notion delivery is per-job (one failure doesn't block the batch); email is a single per-run digest grouped by category, sent once for every job still pending email delivery in that run, not one send per job.
 - `health.json` records the last completed scan, source health, pending deliveries, and sync errors. A failed run leaves checkpointed work for retry.
-- `notion_state.json` durably tracks `pending_pins` and `pending_applied`. Applied rows set `Applied On` and a follow-up date; `follow_up_days` defaults to 14, supports per-profile overrides, and `0` disables the date. Stats report status counts and due follow-ups.
+- There is no Discord integration anywhere in this project (watcher, notion_sync, workflows, or the pinger Worker). If you see `DISCORD_*` env vars, webhook URLs, `message_map.json` usage, or `profiles`/`webhook_env` config referenced in old context, they're stale — do not reintroduce them.
+- `notion_sync.py` maintains **one** Notion database ("All Internship Postings") that serves as both the master log and the personal tracker — there's only one user, so there's no per-person database, no 📌-reaction save flow, and no Discord applied-link channel. Every new posting is upserted with `Status = Saved` and a `Category` multi-select. Promote a row (Applied/OA/Interview/Offer/Rejected) by editing `Status` directly in Notion.
+- A periodic reconciliation sweep (`_reconcile_applied_status`) backfills `Applied On`/`Follow-up` whenever it finds a row at `Status = Applied` with no `Applied On` yet — this is what replaces the Discord applied-link parsing. `follow_up_days` defaults to 14 (single top-level config value now, since there are no more per-Discord-user profile overrides); `0` disables the follow-up date.
+- For an application to a job the watcher never surfaced, `python notion_sync.py --applied <url>` reuses the ATS-API/HTML-metadata parser (`_parse_job_from_url`, `_ats_api`, and friends — kept verbatim from the old applied-channel implementation) to resolve company/role/location and upsert an `Applied` row.
 - Notion upserts query existing rows by canonical job identity, including legacy rows, so existing history does not need a reseed migration. Previously stripped URLs are not automatically repairable.
-- Applied-link parsing may fetch HTML metadata after trying ATS APIs. Do not claim that the project never fetches HTML.
-- Config defaults include explicit `terms`, `keep_unknown_terms`, `dedup_days` 30, `max_discord_per_run` 50, `follow_up_days` 14, and an empty `profiles` object. Personal `profiles` are keyed by Discord user ID and may specify roles, companies, locations, terms, unknown-term handling, webhook environment variable, and follow-up interval. Profiles affect optional notification routing and follow-up settings; they do not gate explicit saved/applied actions.
-- `PERSONAL_WEBHOOKS_JSON` is a GitHub secret containing a JSON mapping from `DISCORD_WEBHOOK_*` variable names to URLs. The workflow imports it into the environment before running the watcher; `profile.webhook_env` must use that prefix. Keep examples redacted and do not add workflow changes for ordinary profile configuration.
-- A webhook timeout can represent an accepted Discord request, so duplicate Discord posts remain possible. Do not claim exactly-once delivery. Existing Notion-row scans reduce duplicates.
+- Config defaults include explicit `terms` (currently `["Summer 2027"]` only — narrowed from the original four terms), `keep_unknown_terms`, `dedup_days` 30, `follow_up_days` 14, and `category_terms` (per-category keyword lists, see above). `exclude_keywords` also blocks `"trading"`, `"trader"`, and `"research scientist"` outright — those postings never surface at all, not just get uncategorized; this is deliberate (personal preference: quant interest is in the software/data-science side, not trading-desk roles), so `category_terms.Quant`'s own keyword list only has `"quantitative"`, `"quant developer"`, `"quant researcher"` — no trading-flavored terms, since a trading title would never survive the exclude filter to reach categorization anyway. There is no `profiles` config anymore — it existed only to route different people's Discord webhooks, which no longer applies to this single-user tool.
 
 ## Deployment facts
 
@@ -26,13 +53,13 @@ The `internship-pinger` Cloudflare Worker is now in this repository. It triggers
 - The original `github.com/avyTamuGit/internship-watcher` deployment was disabled during the account migration. Do not re-enable it while the new deployment is the active path.
 - `gh` CLI is not installed on this machine. The old macOS keychain credential belongs to `avyTamuGit`; pushing to the new repo uses SSH.
 - Existing Notion history and state were carried across during migration. Do not reseed or delete state casually.
-- Secrets normally include Discord webhooks, `DISCORD_BOT_TOKEN`, `APPLIED_CHANNEL_ID`, `NOTION_TOKEN`, and `NOTION_PARENT_PAGE_ID`; SMTP secrets are optional.
+- Secrets: `NOTION_TOKEN`, `NOTION_PARENT_PAGE_ID` (watcher and, optionally, the pinger Worker for its health callout); SMTP secrets (`SMTP_USER`, `SMTP_PASS`, optional `ALERT_EMAIL`) are optional but are now the primary delivery surface, not a fallback.
 
 ## Working rules
 
-- Verify every new ATS board slug with `verify_boards.py` before adding it. Wrong slugs can 404 silently.
-- Preserve `seen.json`, `delivery_state.json`, `message_map.json`, and `notion_state.json`. Deleting them can requeue or re-alert historical jobs.
+- Verify every new ATS board slug with `verify_boards.py` before adding it. Wrong slugs can 404 silently. Not every quant/prop-trading firm is on Greenhouse/Lever/Ashby — Citadel, Citadel Securities, Bridgewater Associates, DE Shaw, and Trading Technology Group (TGS) were checked and failed verification under every slug guess tried; they'd need custom-domain scraping or manual tracking, which is out of scope for the ATS fetchers.
+- Preserve `seen.json`, `delivery_state.json`, and `notion_state.json`. Deleting them can requeue or re-alert historical jobs. `message_map.json` is vestigial (Discord message-id map, unused since Discord was removed) — it's left on disk untouched rather than actively migrated, since nothing reads or writes it anymore; safe to delete manually if you want to clean up.
+- A one-time migration in `watcher.main()` strips any `discord:*` entries from `delivery_state.json`'s pending destinations on load, since those queued deliveries can never complete after Discord removal and the new `destinations()`/`deliver()` don't know how to handle that prefix.
 - The workflow always uploads state artifacts with seven-day retention. Persistence runs even after watcher failures and retries rebase/push up to three times; a rebase conflict leaves the artifact available for recovery.
-- Keep retries and state checkpoints durable. A run can fail after an external service accepted a request.
 - Do not add a new feed merely because it sounds useful; inspect whether it duplicates SimplifyJobs or Jobright.
 - Run `python3 -m unittest discover -s tests -v` and `node --test internship-pinger/worker.test.js`. Keep setup and secret documentation useful for both GitHub Actions and local dry runs.

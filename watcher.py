@@ -4,15 +4,15 @@ Internship Watcher
 ------------------
 Polls public job-board APIs (Greenhouse, Lever, Ashby) for the companies in
 config.json, plus the SimplifyJobs aggregated internship feed, filters for
-internship roles matching your keywords, dedupes against seen.json, and sends
-notifications via Discord webhook and/or email.
+internship roles matching your keywords, tags each match with its category
+(quant/general), dedupes against seen.json, and delivers a per-run email
+digest plus a Notion master log.
 
 Designed to run on a schedule (GitHub Actions cron, or local cron). Each run
 checkpoints delivery, deduplication, and tracker state for safe retries.
 """
 
 import argparse
-import json
 import os
 import re
 import smtplib
@@ -26,12 +26,11 @@ from pathlib import Path
 import requests
 
 from job_utils import (load_json, save_json, canonical_url, job_identity,
-                       fingerprint, term_matches, preference_matches)
+                       fingerprint, term_matches, categorize, DEFAULT_CATEGORY)
 
 ROOT = Path(__file__).parent
 CONFIG_PATH = ROOT / "config.json"
 SEEN_PATH = ROOT / "seen.json"
-MSG_MAP_PATH = ROOT / "message_map.json"  # discord message id -> job, for 📌 tracking
 
 SIMPLIFY_URL = (
     "https://raw.githubusercontent.com/SimplifyJobs/"
@@ -268,54 +267,37 @@ def fetch_jobright(cfg):
 
 # ------------------------------------------------------------ notifications
 
-def notify_discord(webhook_url, jobs):
-    """Individual messages in every batch; caller checkpoints each success."""
-    posted, failed = [], set()
-    for j in jobs:
-        content = (f"**{j['company']}** — [{j['title']}]({j['url']})"
-                   + (f" · {j['location']}" if j.get("location") else "")
-                   + "\n-# 📌 react to add this to your Notion tracker")
-        # Avoid invalid payloads from unusually long feed fields.
-        if len(content) > 2000:
-            content = f"**{j['company'][:100]}** — {j['title'][:200]}\n{j['url']}"
-        separator = "&" if "?" in webhook_url else "?"
-        for attempt in range(3):
-            try:
-                r = requests.post(webhook_url + separator + "wait=true",
-                                  json={"content": content, "allowed_mentions": {"parse": []}},
-                                  timeout=TIMEOUT)
-                if r.status_code == 200:
-                    d = r.json()
-                    posted.append({"mid": d["id"], "cid": d["channel_id"],
-                                   "ts": time.time(), "job": j})
-                    break
-                if r.status_code != 429 and r.status_code < 500:
-                    break
-                if attempt < 2:
-                    time.sleep(min(float(r.headers.get("Retry-After", 2 ** attempt)), 30))
-            except (requests.RequestException, ValueError, KeyError):
-                # Timeout can mean accepted-but-response-lost; keep pending.
-                break
-        if not posted or posted[-1]["job"]["id"] != j["id"]:
-            failed.add(j["id"])
-        time.sleep(0.4)
-    return posted, failed
+def _digest_body(jobs):
+    """Group jobs by category so the digest reads as one section per
+    category (alphabetical, DEFAULT_CATEGORY last); a job tagged with
+    several categories appears in each of their sections. The category set
+    itself is whatever config.json's category_terms defines — nothing here
+    is hardcoded to a specific list of categories."""
+    present = {c for j in jobs for c in (j.get("categories") or [DEFAULT_CATEGORY])}
+    order = sorted(present - {DEFAULT_CATEGORY}) + ([DEFAULT_CATEGORY] if DEFAULT_CATEGORY in present else [])
+    sections = []
+    for label in order:
+        in_section = [j for j in jobs if label in (j.get("categories") or [DEFAULT_CATEGORY])]
+        lines = [f"=== {label} ({len(in_section)}) ==="]
+        for j in in_section:
+            lines.append(f"{j['company']} — {j['title']}")
+            if j.get("location"):
+                lines.append(f"  {j['location']}")
+            lines.append(f"  {j['url']}")
+        sections.append("\n".join(lines))
+    return "\n\n".join(sections)
 
 
 def notify_email(cfg, jobs):
+    """One digest per call, grouped by category. Caller batches every job
+    still pending email delivery into a single per-run send."""
     host = os.environ.get("SMTP_HOST", cfg.get("smtp_host", "smtp.gmail.com"))
     port = int(os.environ.get("SMTP_PORT", cfg.get("smtp_port", 587)))
     user = os.environ["SMTP_USER"]
     password = os.environ["SMTP_PASS"]
     to_addr = os.environ.get("ALERT_EMAIL", user)
 
-    body_lines = []
-    for j in jobs:
-        body_lines.append(f"{j['company']} — {j['title']}")
-        if j["location"]:
-            body_lines.append(f"  {j['location']}")
-        body_lines.append(f"  {j['url']}\n")
-    msg = MIMEText("\n".join(body_lines))
+    msg = MIMEText(_digest_body(jobs))
     msg["Subject"] = f"[Internship Watcher] {len(jobs)} new posting(s)"
     msg["From"] = user
     msg["To"] = to_addr
@@ -353,9 +335,13 @@ def discover(cfg):
             except (KeyError, TypeError, ValueError, AttributeError) as exc:
                 SOURCE_HEALTH[name] = {"ok": False, "error": type(exc).__name__}
     terms = cfg.get("terms", cfg.get("simplify", {}).get("terms", []))
-    return [j for j in jobs if matches(j["title"], include, exclude)
-            and not location_excluded(j.get("location", ""), cfg.get("exclude_locations", []))
-            and term_matches(j, terms, cfg.get("keep_unknown_terms", True))]
+    category_terms = cfg.get("category_terms", {})
+    matched = [j for j in jobs if matches(j["title"], include, exclude)
+               and not location_excluded(j.get("location", ""), cfg.get("exclude_locations", []))
+               and term_matches(j, terms, cfg.get("keep_unknown_terms", True))]
+    for j in matched:
+        j["categories"] = categorize(j, category_terms)
+    return matched
 
 
 def select_new(jobs, seen, ledger, now, ttl_days=30):
@@ -383,57 +369,43 @@ def select_new(jobs, seen, ledger, now, ttl_days=30):
 
 def destinations(job, cfg):
     result = []
-    top_names = {c["name"].lower() for c in cfg.get("companies", [])}
-    top = (job["id"].split(":", 1)[0] in ("greenhouse", "lever", "ashby", "simplify")
-           or job["company"].lower() in top_names
-           or company_matches(job["company"], cfg.get("simplify", {}).get("company_keywords", [])))
-    hook = "DISCORD_WEBHOOK_URL_TOP" if top and os.environ.get("DISCORD_WEBHOOK_URL_TOP") else "DISCORD_WEBHOOK_URL"
-    if os.environ.get(hook):
-        result.append("discord:" + hook)
     if os.environ.get("SMTP_USER") and os.environ.get("SMTP_PASS"):
         result.append("email")
     if os.environ.get("NOTION_TOKEN") and os.environ.get("NOTION_PARENT_PAGE_ID"):
         result.append("notion")
-    for uid, preferences in cfg.get("profiles", {}).items():
-        hook = preferences.get("webhook_env")
-        if hook and os.environ.get(hook) and preference_matches(job, preferences):
-            result.append("discord:" + hook)
-    return list(dict.fromkeys(result))
+    return result
 
 
-def deliver(ledger, cfg, msg_map, checkpoint):
-    # Bound work while retaining every undelivered job for the next run.
-    budget = cfg.get("max_discord_per_run", 50)
-    for entry in list(ledger.setdefault("pending", {}).values()):
-        for destination in list(entry["destinations"]):
-            job = entry["job"]
-            success = False
-            try:
-                if destination.startswith("discord:"):
-                    hook = os.environ.get(destination.split(":", 1)[1])
-                    if not hook or budget <= 0:
-                        continue
-                    budget -= 1
-                    records, failures = notify_discord(hook, [job])
-                    success = not failures
-                    for rec in records:
-                        msg_map[rec["mid"]] = {k: rec[k] for k in ("cid", "ts", "job")}
-                        save_json(MSG_MAP_PATH, msg_map)
-                elif destination == "email":
-                    notify_email(cfg, [job])
-                    success = True
-                elif destination == "notion":
-                    import notion_sync
-                    success = notion_sync.log_master(job)
-            except (requests.RequestException, smtplib.SMTPException, OSError, ValueError, KeyError) as exc:
-                entry["error"] = type(exc).__name__
-            if success:
-                entry["destinations"].remove(destination)
+def deliver(ledger, cfg, checkpoint):
+    pending = ledger.setdefault("pending", {})
+    # Notion stays per-job so one failure doesn't block the rest of the batch.
+    for entry in list(pending.values()):
+        if "notion" not in entry["destinations"]:
+            continue
+        try:
+            import notion_sync
+            if notion_sync.log_master(entry["job"]):
+                entry["destinations"].remove("notion")
                 entry.pop("error", None)
             else:
                 entry["attempts"] = entry.get("attempts", 0) + 1
-            checkpoint()
-    ledger["pending"] = {k: v for k, v in ledger["pending"].items() if v["destinations"]}
+        except (requests.RequestException, OSError, ValueError, KeyError) as exc:
+            entry["error"] = type(exc).__name__
+        checkpoint()
+    # Email is a single per-run digest grouped by category, not one send per job.
+    email_entries = [e for e in pending.values() if "email" in e["destinations"]]
+    if email_entries:
+        try:
+            notify_email(cfg, [e["job"] for e in email_entries])
+            for e in email_entries:
+                e["destinations"].remove("email")
+                e.pop("error", None)
+        except (smtplib.SMTPException, OSError, ValueError, KeyError) as exc:
+            for e in email_entries:
+                e["error"] = type(exc).__name__
+                e["attempts"] = e.get("attempts", 0) + 1
+        checkpoint()
+    ledger["pending"] = {k: v for k, v in pending.items() if v["destinations"]}
     checkpoint()
 
 
@@ -446,26 +418,19 @@ def validate_config(cfg):
             raise ValueError("Every company needs name, ats, and board strings")
         if company["ats"] not in ATS_FETCHERS:
             raise ValueError("Unsupported ATS: " + company["ats"])
-    for key in ("max_discord_per_run", "dedup_days", "follow_up_days"):
+    for key in ("dedup_days", "follow_up_days"):
         if key in cfg and (type(cfg[key]) is not int or cfg[key] < 0):
             raise ValueError(key + " must be a non-negative integer")
     for key in ("terms", "include_keywords", "exclude_keywords", "exclude_locations"):
         if key in cfg and (not isinstance(cfg[key], list) or not all(isinstance(v, str) for v in cfg[key])):
             raise ValueError(key + " must be a list of strings")
-    if not isinstance(cfg.get("profiles", {}), dict):
-        raise ValueError("profiles must map Discord user IDs to preferences")
-    for profile in cfg.get("profiles", {}).values():
-        if not isinstance(profile, dict):
-            raise ValueError("Each profile must be an object")
-        for key in ("roles", "companies", "locations", "terms"):
-            if key in profile and (not isinstance(profile[key], list)
-                                   or not all(isinstance(v, str) for v in profile[key])):
-                raise ValueError("Profile " + key + " must be a list of strings")
-        if "follow_up_days" in profile and (type(profile["follow_up_days"]) is not int or profile["follow_up_days"] < 0):
-            raise ValueError("Profile follow_up_days must be a non-negative integer")
-        if "webhook_env" in profile and (not isinstance(profile["webhook_env"], str)
-                                         or not profile["webhook_env"].startswith("DISCORD_WEBHOOK_")):
-            raise ValueError("Profile webhook_env must begin DISCORD_WEBHOOK_")
+    category_terms = cfg.get("category_terms", {})
+    if not isinstance(category_terms, dict):
+        raise ValueError("category_terms must be an object")
+    for key in ("quant", "general"):
+        if key in category_terms and (not isinstance(category_terms[key], list)
+                                      or not all(isinstance(v, str) for v in category_terms[key])):
+            raise ValueError("category_terms." + key + " must be a list of strings")
 
 
 def main(argv=None):
@@ -474,23 +439,16 @@ def main(argv=None):
     args = parser.parse_args(argv)
     cfg = load_json(CONFIG_PATH, {})
     validate_config(cfg)
-    # Actions supplies optional personal channels in one JSON secret; only
-    # explicitly named Discord webhook variables may be injected.
-    personal_hooks = json.loads(os.environ.get("PERSONAL_WEBHOOKS_JSON") or "{}")
-    if not isinstance(personal_hooks, dict):
-        raise ValueError("PERSONAL_WEBHOOKS_JSON must be an object")
-    for name, value in personal_hooks.items():
-        if not name.startswith("DISCORD_WEBHOOK_") or not isinstance(value, str):
-            raise ValueError("Personal webhook keys must begin DISCORD_WEBHOOK_")
-        os.environ.setdefault(name, value)
-    enabled = any(os.environ.get(k) for k in ("DISCORD_WEBHOOK_URL", "DISCORD_WEBHOOK_URL_TOP"))
-    enabled |= bool(os.environ.get("SMTP_USER") and os.environ.get("SMTP_PASS"))
+    enabled = bool(os.environ.get("SMTP_USER") and os.environ.get("SMTP_PASS"))
     enabled |= bool(os.environ.get("NOTION_TOKEN") and os.environ.get("NOTION_PARENT_PAGE_ID"))
-    enabled |= any(os.environ.get(p.get("webhook_env", "")) for p in cfg.get("profiles", {}).values())
     dry_run = args.dry_run or not enabled
     ledger_path = ROOT / "delivery_state.json"
     health_path = ROOT / "health.json"
     ledger = load_json(ledger_path, {})
+    # One-time migration: drop queued Discord destinations from a pre-upgrade
+    # ledger. Those webhooks are gone, so the entries could never deliver.
+    for entry in ledger.get("pending", {}).values():
+        entry["destinations"] = [d for d in entry["destinations"] if not d.startswith("discord:")]
     # Ledger IDs are authoritative after a crash between the two state writes.
     seen = set(load_json(SEEN_PATH, [])) | set(ledger.get("known_ids", []))
     previous_health = load_json(health_path, {})
@@ -518,12 +476,9 @@ def main(argv=None):
     checkpoint = lambda: save_json(ledger_path, ledger)
     checkpoint()  # persist intent before any external side effect
     save_json(SEEN_PATH, sorted(seen))
-    msg_map = load_json(MSG_MAP_PATH, {})
-    msg_map = {k: v for k, v in msg_map.items() if v["ts"] >= now - 3 * 86400}
-    save_json(MSG_MAP_PATH, msg_map)
     sync_error = None
     try:
-        deliver(ledger, cfg, msg_map, checkpoint)
+        deliver(ledger, cfg, checkpoint)
         if os.environ.get("NOTION_TOKEN") and os.environ.get("NOTION_PARENT_PAGE_ID"):
             import notion_sync
             notion_sync.run([], cfg=cfg)

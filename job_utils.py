@@ -88,13 +88,19 @@ def fingerprint(job):
     return hashlib.sha256(json.dumps(normalized).encode()).hexdigest()
 
 
-def preference_matches(job, preferences):
-    """All configured dimensions must match; empty lists impose no restriction."""
-    for key, field in (('roles', 'title'), ('companies', 'company'),
-                       ('locations', 'location')):
-        wanted = preferences.get(key, [])
-        if wanted and not any(re.search(r'\b' + re.escape(s.lower()) + r'\b',
-                                         job.get(field, '').lower()) for s in wanted):
-            return False
-    return term_matches(job, preferences.get('terms', []),
-                        preferences.get('keep_unknown_terms', True))
+DEFAULT_CATEGORY = "Other"
+
+
+def categorize(job, category_terms):
+    """Field-based category tags: a title is checked against every category's
+    keyword list in config.json's category_terms (arbitrary names, e.g.
+    "Quant", "SWE", "Data Science" — used verbatim as display labels and
+    Notion multi-select option names). A title can match one, several, or
+    none; matching none falls back to DEFAULT_CATEGORY so every job is
+    grouped somewhere for delivery."""
+    title = job.get('title', '').lower()
+    cats = {name for name, keywords in category_terms.items()
+            if any(k.lower() in title for k in keywords)}
+    if not cats:
+        cats.add(DEFAULT_CATEGORY)
+    return sorted(cats)

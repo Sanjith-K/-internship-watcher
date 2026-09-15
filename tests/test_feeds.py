@@ -97,19 +97,15 @@ class FilteringAndRoutingTests(unittest.TestCase):
         self.assertFalse(watcher.location_excluded("Dublin, OH", ["dublin", "ireland"]))
         self.assertTrue(watcher.location_excluded("Dublin, Ireland", ["dublin", "ireland"]))
 
-    def test_profile_webhook_routes_only_matching_profile_and_no_substring_company_match(self):
-        cfg = {"companies": [{"name": "Acme", "ats": "greenhouse", "board": "acme"}],
-               "simplify": {"company_keywords": ["arm"]},
-               "profiles": {"u": {"roles": ["SWE"], "companies": ["Acme"],
-                                    "locations": ["Austin"], "webhook_env": "DISCORD_WEBHOOK_PROFILE"}}}
+    def test_destinations_reflect_configured_credentials(self):
+        cfg = {"companies": [{"name": "Acme", "ats": "greenhouse", "board": "acme"}]}
         acme = {"id": "jobright:1", "company": "Acme", "title": "SWE Intern",
                 "location": "Austin, TX", "url": "u"}
-        farmers = {**acme, "id": "jobright:2", "company": "Farmers"}
-        with patch.dict(os.environ, {"DISCORD_WEBHOOK_URL": "default", "DISCORD_WEBHOOK_URL_TOP": "top",
-                                     "DISCORD_WEBHOOK_PROFILE": "profile"}, clear=True):
-            self.assertEqual(watcher.destinations(acme, cfg),
-                             ["discord:DISCORD_WEBHOOK_URL_TOP", "discord:DISCORD_WEBHOOK_PROFILE"])
-            self.assertEqual(watcher.destinations(farmers, cfg), ["discord:DISCORD_WEBHOOK_URL"])
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(watcher.destinations(acme, cfg), [])
+        with patch.dict(os.environ, {"SMTP_USER": "me@example.com", "SMTP_PASS": "x",
+                                     "NOTION_TOKEN": "t", "NOTION_PARENT_PAGE_ID": "p"}, clear=True):
+            self.assertEqual(watcher.destinations(acme, cfg), ["email", "notion"])
 
 
 if __name__ == "__main__":

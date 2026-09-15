@@ -2,32 +2,32 @@
 """
 Notion sync for the internship watcher.
 
-Three jobs:
-1. Master log — every new posting the watcher finds is appended to one
-   shared Notion database ("All Internship Postings").
-2. Personal trackers — members of the Discord server 📌-react to a job
-   message; this module polls those reactions (Discord bot token, REST
-   only) and files the job into that member's own Notion database,
-   created automatically under the same parent page on first reaction.
-   Members then manage Status (Saved/Applied/OA/Interview/Offer/Rejected)
-   themselves in Notion.
-3. Applied channel — members paste a job link into a dedicated channel;
-   this module reads new messages (REST only), scrapes company/role from
-   the link, and files it into the poster's own tracker with Status
-   "Applied", confirming with a ✅ reaction.
+Two jobs:
+1. Master log / tracker — every new posting the watcher finds is upserted
+   into one Notion database ("All Internship Postings") with Status defaulted
+   to "Saved". There is only one user, so the master log *is* the tracker:
+   promote a row (Applied/OA/Interview/Offer/Rejected) by editing its Status
+   dropdown directly in Notion.
+2. Applied reconciliation — when a row's Status is manually flipped to
+   "Applied" in Notion, the next sync back-fills "Applied On" and "Follow-up"
+   automatically (a periodic sweep, not a message-driven trigger). For an
+   application to a job the watcher never surfaced, run this module with
+   `--applied <url>`: it reuses the ATS-API/HTML-metadata parser below to
+   resolve company/role/location from the URL and upserts an "Applied" row.
 
-Env: NOTION_TOKEN, NOTION_PARENT_PAGE_ID, DISCORD_BOT_TOKEN (optional —
-without it only the master log is synced), APPLIED_CHANNEL_ID (optional —
-enables job 3).
+Env: NOTION_TOKEN, NOTION_PARENT_PAGE_ID.
 
-State: notion_state.json (database ids, which jobs are already filed
-per user), message_map.json (written by watcher.py: message id -> job).
+State: notion_state.json (master database id, dead-posting sweep timestamp,
+stats callout block id).
 """
 
+import argparse
+import hashlib
 import html
 import json
 import os
 import re
+import sys
 import time
 import urllib.parse
 from datetime import datetime, timezone, timedelta
@@ -35,23 +35,15 @@ from pathlib import Path
 
 import requests
 
-from job_utils import canonical_url, job_identity, load_json, save_json
+from job_utils import canonical_url, job_identity, load_json, save_json, DEFAULT_CATEGORY
 
 _PAGE_CACHE = {}
 SYNC_ERRORS = []
 
 ROOT = Path(__file__).parent
 STATE_PATH = ROOT / "notion_state.json"
-MSG_MAP_PATH = ROOT / "message_map.json"
 
 NOTION_API = "https://api.notion.com/v1"
-DISCORD_API = "https://discord.com/api/v10"
-PIN_EMOJI = urllib.parse.quote("📌")
-CHECK_EMOJI = urllib.parse.quote("✅")
-WARN_EMOJI = urllib.parse.quote("⚠️")
-
-DISCORD_EPOCH = 1420070400000  # ms; Discord snowflakes count from here
-URL_RE = re.compile(r"https?://[^\s<>|]+")
 
 STATUS_OPTIONS = [
     {"name": "Saved", "color": "gray"},
@@ -111,19 +103,28 @@ def _notion(method, path, payload=None):
     return None
 
 
-def _create_db(parent_page_id, title, with_status):
+# Cycled across categories in the order given; repeats if there are more
+# categories than colors. Notion also auto-creates any option name it hasn't
+# seen yet, so an uncolored/late-added category still works, just undecorated.
+_CATEGORY_COLORS = ("purple", "blue", "green", "orange", "pink", "yellow", "red", "brown", "gray")
+
+
+def _create_db(parent_page_id, title, categories=()):
     props = {
         "Role": {"title": {}},
         "Company": {"rich_text": {}},
         "Location": {"rich_text": {}},
         "Link": {"url": {}},
         "Source": {"select": {}},
+        "Category": {"multi_select": {"options": [
+            {"name": name, "color": _CATEGORY_COLORS[i % len(_CATEGORY_COLORS)]}
+            for i, name in enumerate(categories)
+        ]}},
         "Added": {"date": {}},
+        "Status": {"select": {"options": STATUS_OPTIONS}},
+        "Applied On": {"date": {}},
+        "Follow-up": {"date": {}},
     }
-    if with_status:
-        props["Status"] = {"select": {"options": STATUS_OPTIONS}}
-        props["Applied On"] = {"date": {}}
-        props["Follow-up"] = {"date": {}}
     d = _notion("POST", "/databases", {
         "parent": {"type": "page_id", "page_id": parent_page_id},
         "title": [{"type": "text", "text": {"content": title}}],
@@ -140,6 +141,7 @@ def _add_row(db_id, job, status=None):
         "Location": {"rich_text": [{"text": {"content": (job.get("location") or "")[:200]}}]},
         "Link": {"url": job["url"] or None},
         "Source": {"select": {"name": source}},
+        "Category": {"multi_select": [{"name": c} for c in job.get("categories", [])]},
         "Added": {"date": {"start": datetime.now(timezone.utc).strftime("%Y-%m-%d")}},
     }
     if status:
@@ -148,119 +150,7 @@ def _add_row(db_id, job, status=None):
                    {"parent": {"database_id": db_id}, "properties": props})
 
 
-# ------------------------------------------------------- discord reactions
-
-def _pin_reactors(bot_token, channel_id, message_id):
-    """Users who 📌-reacted to a message (REST only, no gateway needed).
-
-    Only called for messages the bulk channel scan already showed to have a
-    📌, so it fires a handful of times per run at most. A 429 is NOT "no
-    reactions" — honor Retry-After and retry, otherwise reactions are
-    silently dropped.
-    """
-    url = (f"{DISCORD_API}/channels/{channel_id}/messages/{message_id}"
-           f"/reactions/{PIN_EMOJI}?limit=100")
-    for attempt in range(5):
-        try:
-            r = requests.get(url, headers={"Authorization": f"Bot {bot_token}"},
-                             timeout=30)
-        except requests.exceptions.RequestException as e:
-            # A Discord hiccup on one message shouldn't abort the whole sync.
-            SYNC_ERRORS.append("Discord reaction fetch failed")
-            print(f"  [warn] discord reactions -> {type(e).__name__}; skipping")
-            return []
-        if r.status_code == 429:
-            time.sleep(min(float(r.headers.get("Retry-After", 1)), 5))
-            continue
-        if r.status_code != 200:
-            if r.status_code != 404:  # 404 = message deleted, not noteworthy
-                SYNC_ERRORS.append(f"Discord reactions HTTP {r.status_code}")
-                print(f"  [warn] discord reactions -> HTTP {r.status_code}")
-            return []
-        return [u for u in r.json() if not u.get("bot")]
-    SYNC_ERRORS.append("Discord reactions retries exhausted")
-    print("  [warn] discord reactions -> still rate-limited after retries")
-    return []
-
-
-# --------------------------------------------------- applied-channel links
-
-def _react(bot_token, channel_id, message_id, emoji):
-    """Add a bot reaction to confirm a message was handled (best-effort)."""
-    url = (f"{DISCORD_API}/channels/{channel_id}/messages/{message_id}"
-           f"/reactions/{emoji}/@me")
-    try:
-        requests.put(url, headers={"Authorization": f"Bot {bot_token}"},
-                     timeout=30)
-    except requests.exceptions.RequestException:
-        pass  # a missing ✅ is cosmetic; never let it abort the sync
-
-
-def _channel_messages(bot_token, channel_id, after):
-    """Messages newer than the `after` snowflake (Discord returns newest-first).
-
-    Reads message content over REST — the bot's Message Content intent must be
-    enabled in the Discord developer portal or `content` comes back empty.
-    """
-    url = f"{DISCORD_API}/channels/{channel_id}/messages?limit=100&after={after}"
-    for attempt in range(5):
-        try:
-            r = requests.get(url, headers={"Authorization": f"Bot {bot_token}"},
-                             timeout=30)
-        except requests.exceptions.RequestException as e:
-            SYNC_ERRORS.append("Discord messages fetch failed")
-            print(f"  [warn] discord messages -> {type(e).__name__}; skipping")
-            return []
-        if r.status_code == 429:
-            time.sleep(min(float(r.headers.get("Retry-After", 1)), 5))
-            continue
-        if r.status_code != 200:
-            SYNC_ERRORS.append(f"Discord messages HTTP {r.status_code}")
-            print(f"  [warn] discord messages -> HTTP {r.status_code}: "
-                  f"{r.text[:200]}")
-            return []
-        return r.json()
-    SYNC_ERRORS.append("Discord messages retries exhausted")
-    print("  [warn] discord messages -> still rate-limited after retries")
-    return []
-
-
-def _snowflake_now():
-    """A Discord snowflake for the current instant (used to baseline)."""
-    return str((int(time.time() * 1000) - DISCORD_EPOCH) << 22)
-
-
-def _pinned_message_ids(bot_token, msg_map):
-    """Which tracked messages currently carry a 📌 — found by paging each
-    channel's recent messages in bulk (reaction summaries ride along free),
-    instead of one reactions request per tracked message. Cuts ~150 Discord
-    calls per run down to ~4."""
-    by_channel = {}
-    for mid, rec in msg_map.items():
-        by_channel.setdefault(rec["cid"], []).append(int(mid))
-
-    pinned = set()
-    for cid, mids in by_channel.items():
-        cursor = str(min(mids) - 1)
-        while True:
-            batch = _channel_messages(bot_token, cid, cursor)
-            if not batch:
-                break  # done, or fetch failed — reactions retry next run
-            for m in batch:
-                if m["id"] in msg_map and any(
-                        r.get("emoji", {}).get("name") == "📌"
-                        for r in m.get("reactions", [])):
-                    pinned.add(m["id"])
-            if len(batch) < 100:
-                break
-            cursor = str(max(int(m["id"]) for m in batch))
-    return pinned
-
-
-def _extract_url(text):
-    m = URL_RE.search(text or "")
-    return m.group(0).rstrip(").,]") if m else None
-
+# --------------------------------------------------- applied-link parsing
 
 _META_TAG_RE = re.compile(r"<meta\b[^>]*>", re.IGNORECASE)
 
@@ -495,9 +385,7 @@ def _parse_job_from_url(url):
 
 
 def _state():
-    state = load_json(STATE_PATH, {})
-    state.setdefault("users", {})
-    return state
+    return load_json(STATE_PATH, {})
 
 
 def _save(state):
@@ -518,23 +406,6 @@ def _pages(db):
             _PAGE_CACHE[db] = pages
             return pages
         cursor = result["next_cursor"]
-
-
-def _ensure_tracker(u, parent, days):
-    if not u.get("db"):
-        u["db"] = _create_db(parent, f"📌 {u['name']}'s Internship Tracker", True)
-        if u["db"]:
-            u["tracker_schema"] = 1
-    if not u.get("db"):
-        return False
-    if not u.get("tracker_schema"):
-        result = _notion("PATCH", f"/databases/{u['db']}", {"properties": {
-            "Applied On": {"date": {}}, "Follow-up": {"date": {}}}})
-        if not result:
-            return False
-        u["tracker_schema"] = 1
-    u["follow_up_days"] = days
-    return True
 
 
 def _upsert_row(db, job, status=None, follow_up_days=14):
@@ -570,70 +441,81 @@ def _upsert_row(db, job, status=None, follow_up_days=14):
     return page
 
 
-def log_master(job):
+def _ensure_master_db(cfg):
+    """Creates the master database on first use, with a Category multi-select
+    option pre-declared for every category in config.json's category_terms
+    (plus the DEFAULT_CATEGORY fallback) so the property looks right even
+    before any row uses a given category."""
     state = _state()
     if not state.get("master_db"):
+        categories = list(cfg.get("category_terms", {}).keys()) + [DEFAULT_CATEGORY]
         state["master_db"] = _create_db(os.environ["NOTION_PARENT_PAGE_ID"],
-                                        "All Internship Postings", False)
+                                        "All Internship Postings", categories)
         _save(state)
+    return state
+
+
+def log_master(job):
+    cfg = load_json(ROOT / "config.json", {})
+    state = _ensure_master_db(cfg)
     if not state.get("master_db"):
         return False
-    return bool(_upsert_row(state["master_db"], job))
+    return bool(_upsert_row(state["master_db"], job, status="Saved"))
 
 
-def _sync_applied(state, bot_token, parent, cfg=None):
-    cfg = cfg or {}
-    channel_id = os.environ.get("APPLIED_CHANNEL_ID")
-    if not (bot_token and channel_id):
+# ------------------------------------------------- applied-status reconcile
+
+def _reconcile_applied_status(state, follow_up_days):
+    """Back-fills Applied On/Follow-up when a row's Status is manually flipped
+    to Applied in Notion — the replacement for the old Discord applied-link
+    channel. Promote a row by hand; this fills in the dates on the next sync.
+    Returns True if the sweep completed (independent of whether any row needed
+    an update)."""
+    db = state.get("master_db")
+    if not db:
         return False
-    if not state.get("applied_after"):
-        state["applied_after"] = _snowflake_now()
-        _save(state)
-        return True
-    pending = state.setdefault("pending_applied", {})
-    # Checkpoint each fetched batch before advancing its cursor.
-    for _ in range(10):
-        msgs = _channel_messages(bot_token, channel_id, state["applied_after"])
-        if not msgs:
-            break
-        for m in sorted(msgs, key=lambda m: int(m["id"])):
-            author = m.get("author", {})
-            if not author.get("bot"):
-                urls = list(dict.fromkeys(match.group(0).rstrip(").,]")
-                                          for match in URL_RE.finditer(m.get("content", ""))))
-                if not urls:
-                    _react(bot_token, channel_id, m["id"], WARN_EMOJI)
-                for index, url in enumerate(urls):
-                    pending.setdefault(f"{m['id']}:{index}", {
-                        "mid": m["id"], "uid": author["id"], "url": canonical_url(url),
-                        "name": author.get("global_name") or author.get("username") or author["id"]})
-        state["applied_after"] = str(max(int(m["id"]) for m in msgs))
-        _save(state)
-        if len(msgs) < 100:
-            break
-    for key, rec in list(pending.items()):
-        u = state["users"].setdefault(rec["uid"], {"name": rec["name"], "jobs": []})
-        days = cfg.get("profiles", {}).get(rec["uid"], {}).get("follow_up_days", cfg.get("follow_up_days", 14))
-        if not _ensure_tracker(u, parent, days):
-            _save(state)
+    pages = _pages(db)
+    if pages is None:
+        return False
+    today = datetime.now(timezone.utc).date()
+    updated = 0
+    for page in pages:
+        props = page.get("properties", {})
+        status = (props.get("Status", {}).get("select") or {}).get("name")
+        if status != "Applied":
             continue
-        _save(state)
-        if not rec.get("job"):
-            company, role, location = _parse_job_from_url(rec["url"])
-            rec["job"] = {"id": "applied:" + key, "company": company, "title": role,
-                          "url": rec["url"], "location": location}
-            _save(state)
-        page = _upsert_row(u["db"], rec["job"], "Applied", days)
-        if page:
-            u.setdefault("pages", {})[job_identity(rec["job"])] = page["id"]
-            applied = u.setdefault("applied", [])
-            if rec["url"] not in applied:
-                applied.append(rec["url"])
-            del pending[key]
-            _save(state)
-            if not any(r["mid"] == rec["mid"] for r in pending.values()):
-                _react(bot_token, channel_id, rec["mid"], CHECK_EMOJI)
+        if (props.get("Applied On", {}).get("date") or {}).get("start"):
+            continue
+        due = (today + timedelta(days=follow_up_days)).isoformat() if follow_up_days > 0 else None
+        changes = {"Applied On": {"date": {"start": today.isoformat()}},
+                   "Follow-up": {"date": {"start": due} if due else None}}
+        if _notion("PATCH", f"/pages/{page['id']}", {"properties": changes}):
+            updated += 1
+    if updated:
+        print(f"Notion: back-filled Applied On/Follow-up for {updated} row(s).")
     return True
+
+
+def _cli_applied(url, cfg=None):
+    """`--applied <url>`: log an ad-hoc application the watcher never
+    surfaced, reusing the ATS-API/HTML-metadata parser as-is."""
+    cfg = cfg or load_json(ROOT / "config.json", {})
+    state = _ensure_master_db(cfg)
+    if not state.get("master_db"):
+        print("Could not create or find the master database.")
+        return 1
+    company, role, location = _parse_job_from_url(url)
+    job = {"id": "applied:" + hashlib.sha256(url.encode()).hexdigest()[:16],
+           "company": company, "title": role, "url": canonical_url(url),
+           "location": location}
+    days = cfg.get("follow_up_days", 14)
+    page = _upsert_row(state["master_db"], job, "Applied", days)
+    _save(state)
+    if page:
+        print(f"Logged applied: {company} — {role}" + (f" ({location})" if location else ""))
+        return 0
+    print("Failed to log applied row; see warnings above.")
+    return 1
 
 
 # ---------------------------------------------------- dead-posting sweep
@@ -698,39 +580,37 @@ def _sweep_dead_postings(state):
     now = time.time()
     if now - state.get("dead_sweep_ts", 0) < DEAD_SWEEP_INTERVAL:
         return False
+    db = state.get("master_db")
+    if not db:
+        return False
     complete = True
-
     boards = _config_boards()
     closed = 0
-    for u in state.get("users", {}).values():
-        db = u.get("db")
-        if not db:
-            continue
-        cursor = None
-        while True:
-            payload = {"filter": {"property": "Status",
-                                  "select": {"equals": "Saved"}}}
-            if cursor:
-                payload["start_cursor"] = cursor
-            res = _notion("POST", f"/databases/{db}/query", payload)
-            if not res:
-                complete = False
-                break
-            for page in res.get("results", []):
-                props = page.get("properties", {})
-                link = (props.get("Link") or {}).get("url")
-                comp = "".join(t.get("plain_text", "") for t in
-                               (props.get("Company") or {}).get("rich_text", []))
-                if link and _posting_open(link, comp, boards) is False:
-                    if _notion("PATCH", f"/pages/{page['id']}",
-                               {"properties": {"Status":
-                                               {"select": {"name": "Closed"}}}}):
-                        closed += 1
-                    else:
-                        complete = False
-            cursor = res.get("next_cursor")
-            if not res.get("has_more"):
-                break
+    cursor = None
+    while True:
+        payload = {"filter": {"property": "Status",
+                              "select": {"equals": "Saved"}}}
+        if cursor:
+            payload["start_cursor"] = cursor
+        res = _notion("POST", f"/databases/{db}/query", payload)
+        if not res:
+            complete = False
+            break
+        for page in res.get("results", []):
+            props = page.get("properties", {})
+            link = (props.get("Link") or {}).get("url")
+            comp = "".join(t.get("plain_text", "") for t in
+                           (props.get("Company") or {}).get("rich_text", []))
+            if link and _posting_open(link, comp, boards) is False:
+                if _notion("PATCH", f"/pages/{page['id']}",
+                           {"properties": {"Status":
+                                           {"select": {"name": "Closed"}}}}):
+                    closed += 1
+                else:
+                    complete = False
+        cursor = res.get("next_cursor")
+        if not res.get("has_more"):
+            break
     if closed:
         print(f"Notion: marked {closed} vanished posting(s) Closed.")
     if complete:
@@ -771,29 +651,26 @@ def _follow_ups(db):
 
 
 def _stats_text(state):
-    lines = []
-    for u in state.get("users", {}).values():
-        if not u.get("db"):
-            continue
-        counts = _status_counts(u["db"])
-        if counts is None:
-            continue
-        total = sum(counts.get(s, 0) for s in APPLIED_STATUSES)
-        pipeline = " · ".join(f"{s} {counts.get(s, 0)}"
-                              for s in APPLIED_STATUSES)
-        lines.append(f"{u['name']}: {total} applied — {pipeline}"
-                     f" — Saved {counts.get('Saved', 0)}")
-        due = _follow_ups(u["db"])
-        if due:
-            lines.append(f"⏰ {u['name']}: {len(due)} follow-up(s) due — " + "; ".join(due[:5]))
+    db = state.get("master_db")
+    if not db:
+        return ""
+    counts = _status_counts(db)
+    if counts is None:
+        return ""
+    total = sum(counts.get(s, 0) for s in APPLIED_STATUSES)
+    pipeline = " · ".join(f"{s} {counts.get(s, 0)}" for s in APPLIED_STATUSES)
+    lines = [f"{total} applied — {pipeline} — Saved {counts.get('Saved', 0)}"]
+    due = _follow_ups(db)
+    if due:
+        lines.append(f"⏰ {len(due)} follow-up(s) due — " + "; ".join(due[:5]))
     return "\n".join(lines)
 
 
 def _update_stats(state):
-    """Keep a 📊 callout on the parent page counting how many places each
-    member has applied to. Members flip Status by hand in Notion between
-    runs, so this re-queries the tracker DBs instead of trusting local
-    state. Returns True if state changed."""
+    """Keep a 📊 callout on the parent page summarizing pipeline counts and
+    due follow-ups. Re-queries the tracker DB instead of trusting local state,
+    since status changes happen by hand in Notion between runs. Returns True
+    if state changed."""
     text = _stats_text(state)
     if not text:
         return False
@@ -833,37 +710,24 @@ def run(new_jobs, cfg=None):
         if not log_master(job):
             raise RuntimeError("Master log delivery failed")
     state = _state()
-    parent = os.environ["NOTION_PARENT_PAGE_ID"]
-    bot_token = os.environ.get("DISCORD_BOT_TOKEN")
+    days = cfg.get("follow_up_days", 14)
     try:
-        msg_map = load_json(MSG_MAP_PATH, {})
-        pending = state.setdefault("pending_pins", {})
-        if bot_token and msg_map:
-            for mid in _pinned_message_ids(bot_token, msg_map):
-                rec = msg_map[mid]
-                for user in _pin_reactors(bot_token, rec["cid"], mid):
-                    uid = user["id"]
-                    u = state["users"].setdefault(uid, {
-                        "name": user.get("global_name") or user.get("username") or uid, "jobs": []})
-                    if rec["job"]["id"] not in u["jobs"]:
-                        pending.setdefault(uid + ":" + rec["job"]["id"], {"uid": uid, "job": rec["job"]})
-            _save(state)
-        for key, rec in list(pending.items()):
-            u = state["users"][rec["uid"]]
-            days = cfg.get("profiles", {}).get(rec["uid"], {}).get("follow_up_days", cfg.get("follow_up_days", 14))
-            if _ensure_tracker(u, parent, days):
-                _save(state)
-                page = _upsert_row(u["db"], rec["job"], "Saved")
-                if page:
-                    u.setdefault("pages", {})[job_identity(rec["job"])] = page["id"]
-                    u["jobs"].append(rec["job"]["id"])
-                    del pending[key]
-                    _save(state)
-        _sync_applied(state, bot_token, parent, cfg)
+        _reconcile_applied_status(state, days)
+        _PAGE_CACHE.clear()  # dead-sweep needs fresh Saved-status results
         _sweep_dead_postings(state)
         _PAGE_CACHE.clear()  # fresh statuses after the closing sweep
         _update_stats(state)
     finally:
         _save(state)
-    if state.get("pending_applied") or state.get("pending_pins") or SYNC_ERRORS:
-        raise RuntimeError("Notion/Discord sync needs retry: " + "; ".join(sorted(set(SYNC_ERRORS))))
+    if SYNC_ERRORS:
+        raise RuntimeError("Notion sync needs retry: " + "; ".join(sorted(set(SYNC_ERRORS))))
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--applied", metavar="URL",
+                        help="Log an ad-hoc application by URL (not from the watcher's tracked boards)")
+    args = parser.parse_args()
+    if args.applied:
+        sys.exit(_cli_applied(args.applied))
+    sys.exit(run([]))

@@ -28,16 +28,11 @@ jobs:
 
       - name: Run watcher
         env:
-          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-          DISCORD_WEBHOOK_URL_TOP: ${{ secrets.DISCORD_WEBHOOK_URL_TOP }}
-          DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
-          APPLIED_CHANNEL_ID: ${{ secrets.APPLIED_CHANNEL_ID }}
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           NOTION_PARENT_PAGE_ID: ${{ secrets.NOTION_PARENT_PAGE_ID }}
           SMTP_USER: ${{ secrets.SMTP_USER }}
           SMTP_PASS: ${{ secrets.SMTP_PASS }}
           ALERT_EMAIL: ${{ secrets.ALERT_EMAIL }}
-          PERSONAL_WEBHOOKS_JSON: ${{ secrets.PERSONAL_WEBHOOKS_JSON }}
         run: python watcher.py
 
       - name: Persist state
@@ -45,7 +40,7 @@ jobs:
         run: |
           git config user.name "internship-watcher-bot"
           git config user.email "actions@github.com"
-          for f in seen.json message_map.json notion_state.json delivery_state.json health.json; do
+          for f in seen.json notion_state.json delivery_state.json health.json; do
             git add "$f" 2>/dev/null || true
           done
           git diff --cached --quiet || git commit -m "Update seen postings [skip ci]"
@@ -67,7 +62,6 @@ jobs:
           if-no-files-found: warn
           path: |
             seen.json
-            message_map.json
             notion_state.json
             delivery_state.json
             health.json
