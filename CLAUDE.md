@@ -17,6 +17,21 @@ hourly health status to a Notion callout. Keep worker changes and watcher
 changes conceptually separate; its README and Node test are part of the
 repository.
 
+`application-pipeline/` is a third, separate Cloudflare Workers +
+Workflows project that drafts applications from `Status = Saved` Notion
+rows and gates everything on Discord approval before doing anything
+further. It's deliberately decoupled from the Python watcher — communicates
+only through the shared Notion database, never imports Python code or gets
+triggered from `watcher.py`. It brings a Discord bot back into this repo,
+but **only** as an approval-request/response channel (message buttons via
+Discord's HTTP Interactions model, not a Gateway connection, not the old
+📌-reaction tracker) — the Notion `Status` column still owns save-tracking,
+per the earlier Discord-removal decision; this addition doesn't reverse
+that. See `application-pipeline/README.md` for the full design, including
+why there is no automated application-submission code anywhere in it (ToS
+uncertainty for Greenhouse/Lever — flagged explicitly rather than assumed
+safe; approval hands off to a human clicking the real apply link instead).
+
 ## Architecture facts
 
 - `watcher.py` fetches the configured Greenhouse, Lever, and Ashby boards and the enabled aggregate feeds.

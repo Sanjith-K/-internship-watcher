@@ -46,6 +46,14 @@ triggers the `watch.yml` workflow and monitors completed main-branch runs,
 writing an hourly health status to a Notion callout. See
 [`internship-pinger/README.md`](internship-pinger/README.md) for its setup.
 
+A third, separate Cloudflare piece, `application-pipeline/`, drafts
+applications from Notion rows and posts them to Discord for approval via
+message buttons before doing anything further — it never auto-submits an
+application anywhere (see its README for why). It only talks to the same
+shared Notion database; it doesn't call into this Python code and this
+Python code doesn't call into it. See
+[`application-pipeline/README.md`](application-pipeline/README.md).
+
 ## Notion: the master log is the tracker
 
 The Notion database **All Internship Postings** is both the master log and

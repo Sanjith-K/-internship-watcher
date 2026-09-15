@@ -1,0 +1,29 @@
+name = "application-pipeline"
+main = "src/index.ts"
+compatibility_date = "2026-07-01"
+workers_dev = false
+
+# Every 10 minutes: poll Notion for Status=Saved rows and start a new
+# ApplyWorkflow instance for each one that doesn't have one yet.
+# Once daily at 13:00 UTC (~9am ET): post the stuck/needs-attention digest.
+# The scheduled() handler in src/index.ts branches on event.cron to tell
+# these apart.
+[triggers]
+crons = ["*/10 * * * *", "0 13 * * *"]
+
+[[workflows]]
+name = "apply-workflow"
+binding = "APPLY_WORKFLOW"
+class_name = "ApplyWorkflow"
+
+# Maps a short Discord button custom_id -> {job_identity, notion_page_id}.
+# A flat, no-coordination-needed lookup, so KV (not a Durable Object) is
+# the right amount of infrastructure for it.
+[[kv_namespaces]]
+binding = "PENDING_APPROVALS"
+id = "REPLACE_WITH_YOUR_KV_NAMESPACE_ID"
+
+# Native Workers AI binding for drafting free-text answers. No secret
+# needed — billed through the same Cloudflare account as everything else.
+[ai]
+binding = "AI"
